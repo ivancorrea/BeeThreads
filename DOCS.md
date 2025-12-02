@@ -1,6 +1,6 @@
 # bee-threads - Internal Documentation
 
-> Para contribuidores e desenvolvedores que querem entender/modificar o código.
+> For contributors and developers who want to understand/modify the code.
 
 ---
 
@@ -8,242 +8,245 @@
 
 ### `src/index.js` - Public API
 
-**O que faz:** Ponto de entrada da lib. Exporta `beeThreads` e as classes de erro.
+**What it does:** Library entry point. Exports `beeThreads` and error classes.
 
-**Por que existe:** Único arquivo que usuários devem importar. Esconde toda a complexidade interna.
+**Why it exists:** Single file users should import. Hides all internal complexity.
 
 ```js
-// Usuário só precisa saber disso:
+// Users only need to know this:
 const { beeThreads, TimeoutError } = require('bee-threads');
 ```
 
-**Responsabilidades:**
-- Expor `beeThreads.run()`, `safeRun()`, `withTimeout()`, `stream()`
-- Expor `configure()`, `shutdown()`, `getPoolStats()`
-- Re-exportar classes de erro
+**Responsibilities:**
+- Expose `beeThreads.run()`, `safeRun()`, `withTimeout()`, `stream()`
+- Expose `configure()`, `shutdown()`, `getPoolStats()`
+- Re-export error classes
 
 ---
 
 ### `src/config.js` - State Management
 
-**O que faz:** Centraliza TODA configuração e estado mutável.
+**What it does:** Centralizes ALL configuration and mutable state.
 
-**Por que existe:** Ter um único lugar pra ver/resetar estado facilita debug e testes.
+**Why it exists:** Having a single place to view/reset state makes debugging and testing easier.
 
-**Estado que mantém:**
+**State it maintains:**
 ```js
-config        // Configurações do usuário (poolSize, timeout, etc)
-pools         // Workers ativos { normal: [], generator: [] }
-poolCounters  // Contadores O(1) { busy: n, idle: n }
-queues        // Tasks esperando worker
-metrics       // Estatísticas de execução
+config        // User settings (poolSize, timeout, etc)
+pools         // Active workers { normal: [], generator: [] }
+poolCounters  // O(1) counters { busy: n, idle: n }
+queues        // Tasks waiting for worker
+metrics       // Execution statistics
 ```
 
-**Por que poolCounters existe:**
-Evita iterar o array de workers só pra contar quantos estão ocupados. `getWorker()` checa `counters.idle > 0` em O(1).
+**Why poolCounters exists:**
+Avoids iterating the worker array just to count how many are busy. `getWorker()` checks `counters.idle > 0` in O(1).
 
 ---
 
 ### `src/pool.js` - Worker Pool
 
-**O que faz:** Gerencia ciclo de vida dos workers.
+**What it does:** Manages worker lifecycle.
 
-**Por que existe:** Separar lógica de pool da lógica de execução.
+**Why it exists:** Separate pool logic from execution logic.
 
-**Funções principais:**
+**Main functions:**
 
-| Função | O que faz |
-|--------|-----------|
-| `createWorkerEntry()` | Cria worker com metadata (tasksExecuted, failureCount, etc) |
-| `getWorker()` | Pega worker disponível usando least-used balancing |
-| `releaseWorker()` | Devolve worker pro pool ou termina se temporário |
-| `requestWorker()` | Wrapper async - retorna worker ou enfileira task |
-| `scheduleIdleTimeout()` | Agenda terminar worker ocioso após X ms |
+| Function | What it does |
+|----------|--------------|
+| `createWorkerEntry()` | Creates worker with metadata (tasksExecuted, failureCount, etc) |
+| `getWorker()` | Gets available worker using least-used balancing |
+| `releaseWorker()` | Returns worker to pool or terminates if temporary |
+| `requestWorker()` | Async wrapper - returns worker or queues task |
+| `scheduleIdleTimeout()` | Schedules terminating idle worker after X ms |
 
-**Estratégia de seleção (getWorker):**
+**Selection strategy (getWorker):**
 ```
-1. Tem worker idle? → Pega o com menos tasks executadas (load balancing)
-2. Pool não cheio? → Cria novo worker
-3. Pode criar temporário? → Cria (será terminado após uso)
-4. Senão → Enfileira task
+1. Has idle worker? → Pick the one with fewest tasks executed (load balancing)
+2. Pool not full? → Create new worker
+3. Can create temporary? → Create (will be terminated after use)
+4. Otherwise → Queue task
 ```
 
-**Por que least-used:**
-Distribui carga uniformemente. Evita cenário onde 1 worker faz tudo enquanto outros ficam parados.
+**Why least-used:**
+Distributes load evenly. Avoids scenario where 1 worker does everything while others sit idle.
 
 ---
 
 ### `src/execution.js` - Task Engine
 
-**O que faz:** Executa tasks nos workers.
+**What it does:** Executes tasks on workers.
 
-**Por que existe:** Separar comunicação com worker da lógica de pool/API.
+**Why it exists:** Separate worker communication from pool/API logic.
 
-**Funções:**
+**Functions:**
 
-| Função | O que faz |
-|--------|-----------|
-| `executeOnce()` | Executa 1 vez (sem retry) |
-| `execute()` | Executa com retry se configurado |
+| Function | What it does |
+|----------|--------------|
+| `executeOnce()` | Executes once (no retry) |
+| `execute()` | Executes with retry if configured |
 
-**Fluxo de executeOnce:**
+**executeOnce flow:**
 ```
-1. Checa se AbortSignal já foi abortado
-2. Pede worker via requestWorker()
-3. Configura listeners (message, error, exit)
-4. Configura timeout se houver
-5. Configura abort handler se houver
-6. Envia task: worker.postMessage({ fn, args, context })
-7. Espera resposta
+1. Check if AbortSignal already aborted
+2. Request worker via requestWorker()
+3. Setup listeners (message, error, exit)
+4. Setup timeout if any
+5. Setup abort handler if any
+6. Send task: worker.postMessage({ fn, args, context })
+7. Wait for response
 8. Cleanup (remove listeners, release worker)
 9. Resolve/reject promise
 ```
 
-**Por que retry é separado:**
-`execute()` é um wrapper que chama `executeOnce()` em loop com backoff.
+**Why retry is separate:**
+`execute()` is a wrapper that calls `executeOnce()` in a loop with backoff.
 
 ---
 
 ### `src/executor.js` - Fluent API Builder
 
-**O que faz:** Constrói a API chainable que o usuário usa.
+**What it does:** Builds the chainable API that users use.
 
-**Por que existe:** Separar interface do usuário da implementação.
+**Why it exists:** Separate user interface from implementation.
 
-**Pattern usado:** Builder imutável
+**Pattern used:** Immutable builder
 
 ```js
-// Cada método retorna NOVO executor (não muta)
+// Each method returns NEW executor (doesn't mutate)
 const exec1 = beeThreads.run(fn);
-const exec2 = exec1.usingParams(1);  // exec1 não mudou
-const exec3 = exec2.setContext({});  // exec2 não mudou
+const exec2 = exec1.usingParams(1);  // exec1 unchanged
+const exec3 = exec2.setContext({});  // exec2 unchanged
 ```
 
-**Por que imutável:**
-Permite reusar executors parcialmente configurados:
+**Why immutable:**
+Allows reusing partially configured executors:
 ```js
 const base = beeThreads.run(fn).setContext({ API_KEY });
 await base.usingParams(1).execute();
-await base.usingParams(2).execute(); // Reutiliza config
+await base.usingParams(2).execute(); // Reuses config
 ```
 
 ---
 
 ### `src/stream-executor.js` - Generator Streaming
 
-**O que faz:** Mesmo que executor.js, mas pra generators.
+**What it does:** Same as executor.js, but for generators.
 
-**Por que separado:** Generators têm protocolo diferente (yield/end ao invés de ok/error).
+**Why separate:** Generators have different protocol (yield/end instead of ok/error).
 
-**Output:** `ReadableStream` padrão do Node/Browser.
+**Output:** Standard Node/Browser `ReadableStream`.
 
 ---
 
 ### `src/errors.js` - Error Classes
 
-**O que faz:** Define classes de erro tipadas.
+**What it does:** Defines typed error classes.
 
-**Por que existe:** Permite `instanceof` checks e códigos de erro consistentes.
+**Why it exists:** Allows `instanceof` checks and consistent error codes.
 
 ```js
 class TimeoutError extends AsyncThreadError {
   constructor(ms) {
     super(`Worker timed out after ${ms}ms`, 'ERR_TIMEOUT');
-    this.timeout = ms;  // Info extra útil
+    this.timeout = ms;  // Useful extra info
   }
 }
 ```
 
-**Erros definidos:**
+**Defined errors:**
 
-| Classe | Código | Quando |
-|--------|--------|--------|
-| `AbortError` | `ERR_ABORTED` | Task cancelada via AbortSignal |
-| `TimeoutError` | `ERR_TIMEOUT` | Excedeu tempo limite |
-| `QueueFullError` | `ERR_QUEUE_FULL` | Fila de tasks cheia |
-| `WorkerError` | `ERR_WORKER` | Erro dentro do worker |
+| Class | Code | When |
+|-------|------|------|
+| `AbortError` | `ERR_ABORTED` | Task cancelled via AbortSignal |
+| `TimeoutError` | `ERR_TIMEOUT` | Exceeded time limit |
+| `QueueFullError` | `ERR_QUEUE_FULL` | Task queue full |
+| `WorkerError` | `ERR_WORKER` | Error inside worker |
 
 ---
 
 ### `src/worker.js` - Worker Script
 
-**O que faz:** Código que roda no worker thread.
+**What it does:** Code that runs in the worker thread.
 
-**Por que separado:** Worker é processo isolado, precisa de arquivo próprio.
+**Why separate:** Worker is isolated process, needs its own file.
 
-**Fluxo:**
+**Flow:**
 ```
-1. Recebe: { fn: string, args: [], context: {} }
-2. Valida que fn parece uma função (segurança)
-3. Se tem context → injeta variáveis no escopo
-4. eval() o código da função
-5. Aplica args (suporta curried automaticamente)
-6. Se retorno é Promise → espera
-7. Envia: { ok: true, value } ou { ok: false, error }
+1. Receive: { fn: string, args: [], context: {} }
+2. Validate that fn looks like a function (security)
+3. If has context → inject variables into scope
+4. eval() the function code
+5. Apply args (supports curried automatically)
+6. If return is Promise → wait
+7. Send: { ok: true, value } or { ok: false, error }
 ```
 
-**applyCurried() - Por que existe:**
+**applyCurried() - Why it exists:**
 ```js
-// Função normal: fn(1, 2, 3)
+// Normal function: fn(1, 2, 3)
 // Curried: fn(1)(2)(3)
-// Queremos que ambos funcionem com usingParams(1, 2, 3)
+// We want both to work with usingParams(1, 2, 3)
 ```
+
+**Console forwarding:**
+All `console.log/warn/error/info/debug` calls are intercepted and sent to main thread via `postMessage`. They appear prefixed with `[worker]`.
 
 ---
 
 ### `src/generator-worker.js` - Generator Worker
 
-**O que faz:** Worker especializado pra generators.
+**What it does:** Specialized worker for generators.
 
-**Por que separado:** Protocolo diferente - envia múltiplas mensagens (uma por yield).
+**Why separate:** Different protocol - sends multiple messages (one per yield).
 
-**Mensagens enviadas:**
+**Messages sent:**
 ```js
-{ type: 'yield', value }  // Cada yield
-{ type: 'return', value } // Valor final do return
-{ type: 'end' }           // Generator terminou
-{ type: 'error', error }  // Deu erro
+{ type: 'yield', value }  // Each yield
+{ type: 'return', value } // Final return value
+{ type: 'end' }           // Generator finished
+{ type: 'error', error }  // Error occurred
+{ type: 'log', level, args } // Console output
 ```
 
 ---
 
 ### `src/validation.js` - Input Validation
 
-**O que faz:** Funções de validação de input.
+**What it does:** Input validation functions.
 
-**Por que separado:** DRY - mesmas validações usadas em vários lugares.
+**Why separate:** DRY - same validations used in multiple places.
 
 ```js
-validateFunction(fn)   // Checa se é função
-validateTimeout(ms)    // Checa se é número positivo finito
-validatePoolSize(n)    // Checa se é inteiro >= 1
-validateClosure(obj)   // Checa se é objeto não-null
+validateFunction(fn)   // Check if is function
+validateTimeout(ms)    // Check if positive finite number
+validatePoolSize(n)    // Check if integer >= 1
 ```
 
 ---
 
 ### `src/utils.js` - Utilities
 
-**O que faz:** Funções utilitárias genéricas.
+**What it does:** Generic utility functions.
 
-**Por que separado:** Reutilizáveis e testáveis isoladamente.
+**Why separate:** Reusable and testable in isolation.
 
 ```js
-deepFreeze(obj)      // Congela objeto recursivamente (pra getPoolStats)
-sleep(ms)            // Promise que resolve após X ms
-calculateBackoff()   // Calcula delay exponencial com jitter
+deepFreeze(obj)      // Recursively freeze object (for getPoolStats)
+sleep(ms)            // Promise that resolves after X ms
+calculateBackoff()   // Calculate exponential delay with jitter
 ```
 
-**Por que jitter no backoff:**
-Evita thundering herd - se 100 tasks falharem juntas, não queremos todas retentando no mesmo momento.
+**Why jitter in backoff:**
+Avoids thundering herd - if 100 tasks fail together, we don't want them all retrying at the same time.
 
 ---
 
 ### `src/index.d.ts` - TypeScript Types
 
-**O que faz:** Definições de tipos pra TypeScript.
+**What it does:** Type definitions for TypeScript.
 
-**Por que existe:** Autocomplete e type checking pra usuários de TS.
+**Why it exists:** Autocomplete and type checking for TS users.
 
 ---
 
@@ -284,6 +287,25 @@ Evita thundering herd - se 100 tasks falharem juntas, não queremos todas retent
 
 ---
 
+## Technical Decisions
+
+### Why `eval()` instead of `new Function()`?
+`eval()` allows injecting context variables into the function's lexical scope. With `new Function()`, we'd need to pass context as parameters, making the API more complex.
+
+### Why `worker.unref()`?
+Workers don't block process exit. When your script finishes, Node.js terminates naturally without needing to call `shutdown()`.
+
+### Why separate pools for normal/generator?
+Different message protocols. Normal workers send one response. Generator workers send multiple (one per yield). Mixing them would complicate the code.
+
+### Why immutable executor pattern?
+Allows reusing partially configured executors. Each `.usingParams()` or `.setContext()` returns a new executor, so the original can be reused with different params.
+
+### Why least-used load balancing?
+Simple and effective. Always picks the worker with fewest executed tasks. Prevents one worker from being overloaded while others sit idle.
+
+---
+
 ## Adding a New Feature
 
 ### Example: Adding `.timeout()` method to executor
@@ -315,15 +337,17 @@ npm test
 node test.js
 ```
 
+Current coverage: **100 tests**
+
 ---
 
 ## Code Style
 
-- JSDoc em todas as funções públicas
-- Comentários "Why this exists" em módulos
-- Nomes descritivos (não abreviar)
-- Funções pequenas e focadas
-- Estado centralizado em config.js
+- JSDoc on all public functions
+- "Why this exists" comments on modules
+- Descriptive names (don't abbreviate)
+- Small, focused functions
+- Centralized state in config.js
 
 ---
 

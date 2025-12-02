@@ -219,15 +219,16 @@ beeThreads.configure({
 
 ## Why bee-threads?
 
-| Feature | bee-threads | Piscina | workerpool |
-|---------|:-----------:|:-------:|:----------:|
-| Inline functions | ✅ | ❌ | ❌ |
-| Closure injection | ✅ | ❌ | ❌ |
-| Fluent API | ✅ | ❌ | ❌ |
-| Generators | ✅ | ❌ | ❌ |
-| AbortSignal | ✅ | ❌ | ❌ |
-| Auto-retry | ✅ | ❌ | ❌ |
-| Curried functions | ✅ | ❌ | ❌ |
+- ✅ **Inline functions** - Write functions directly, no separate worker files
+- ✅ **Closure injection** - Pass external variables with `.setContext()`
+- ✅ **Fluent API** - Chain methods naturally
+- ✅ **Generators** - Stream values with `beeThreads.stream()`
+- ✅ **AbortSignal** - Cancel tasks with AbortController
+- ✅ **Auto-retry** - Retry failed tasks with exponential backoff
+- ✅ **Curried functions** - Automatic support for curried functions
+- ✅ **Console forwarding** - `console.log` in workers prints to main thread
+- ✅ **TypeScript** - Full type definitions included
+- ✅ **Zero config** - Works out of the box, sensible defaults
 
 ## License
 
