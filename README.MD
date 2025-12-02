@@ -11,11 +11,14 @@ Run CPU-intensive JavaScript in worker threads. No separate files, just inline f
 ```js
 const { beeThreads } = require('bee-threads');
 
-const result = await beeThreads
-  .run((a, b) => a + b)
-  .usingParams(1, 2)
+// Hash password without blocking the event loop
+const hash = await beeThreads
+  .run((password) => {
+    const crypto = require('crypto');
+    return crypto.pbkdf2Sync(password, 'salt', 100000, 64, 'sha512').toString('hex');
+  })
+  .usingParams('user-password')
   .execute();
-// → 3
 ```
 
 ## Install
