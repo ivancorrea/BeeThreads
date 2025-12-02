@@ -6,18 +6,16 @@
 
 > **Handle threading as promises.**
 
-Run CPU-intensive JavaScript in worker threads without blocking the main thread. Simple, fluent API.
+Run CPU-intensive JavaScript in worker threads. No separate files, just inline functions.
 
 ```js
 const { beeThreads } = require('bee-threads');
 
 const result = await beeThreads
-  .run((data) => {
-    // Runs in a separate thread!
-    return heavyComputation(data);
-  })
-  .usingParams(largeDataset)
+  .run((a, b) => a + b)
+  .usingParams(1, 2)
   .execute();
+// → 3
 ```
 
 ## Install
@@ -28,64 +26,30 @@ npm install bee-threads
 
 ## Features
 
-✅ **Inline functions** - No separate worker files needed  
-✅ **Closure injection** - Use external variables with `.setContext()`  
-✅ **Fluent API** - Chain methods naturally  
-✅ **Generators** - Stream values with `beeThreads.stream()`  
-✅ **Cancellation** - AbortController support  
-✅ **Retry** - Automatic retry with exponential backoff  
-✅ **TypeScript** - Full type definitions included  
-✅ **Console logs** - `console.log` in workers prints to main thread  
+- **Inline functions** - No worker files needed
+- **Closure injection** - `.setContext()` for external variables
+- **Generators** - Stream with `stream()`
+- **Cancellation** - AbortController support
+- **Retry** - Exponential backoff
+- **Priority** - `high`, `normal`, `low` queue ordering
+- **TypeScript** - Full types included
 
-## Quick Start
+## Examples
 
-### Basic Usage
-
-```js
-const result = await beeThreads
-  .run((a, b) => a + b)
-  .usingParams(1, 2)
-  .execute();
-// → 3
-```
-
-### No Parameters? No Problem
+### External Variables
 
 ```js
-// usingParams() is optional when function has no arguments
-const result = await beeThreads
-  .run(() => heavyComputation())
-  .execute();
-```
+const TAX = 0.2;
 
-### With External Variables
-
-Functions can't capture closures. Use `.setContext()` to inject them:
-
-```js
-const TAX_RATE = 0.2;
-
-const result = await beeThreads
-  .run((price) => price * (1 + TAX_RATE))
+await beeThreads
+  .run((price) => price * (1 + TAX))
   .usingParams(100)
-  .setContext({ TAX_RATE })
+  .setContext({ TAX })
   .execute();
 // → 120
 ```
 
-### Console Logs from Workers
-
-```js
-await beeThreads
-  .run(() => {
-    console.log('This prints on main thread!');
-    return 42;
-  })
-  .execute();
-// Output: [worker] This prints on main thread!
-```
-
-### Safe Mode (Never Throws)
+### Safe Mode
 
 ```js
 const result = await beeThreads
@@ -94,165 +58,93 @@ const result = await beeThreads
 
 if (result.status === 'rejected') {
   console.error(result.error);
-} else {
-  console.log(result.value);
 }
 ```
 
-### With Timeout
+### Timeout & Cancellation
 
 ```js
-await beeThreads
-  .withTimeout(5000)(heavyTask)
-  .usingParams(data)
-  .execute();
+// Timeout
+await beeThreads.withTimeout(5000)(task).execute();
+
+// Cancel
+const ctrl = new AbortController();
+beeThreads.run(task).signal(ctrl.signal).execute();
+ctrl.abort();
 ```
 
-### Cancellation
-
-```js
-const controller = new AbortController();
-
-const task = beeThreads
-  .run(heavyTask)
-  .usingParams()
-  .signal(controller.signal)
-  .execute();
-
-// Cancel anytime
-controller.abort();
-```
-
-### Streaming (Generators)
+### Streaming
 
 ```js
 const stream = beeThreads
   .stream(function* (n) {
-    for (let i = 0; i < n; i++) {
-      yield i * i;
-    }
+    for (let i = 0; i < n; i++) yield i * i;
   })
   .usingParams(5)
   .execute();
 
-for await (const value of stream) {
-  console.log(value); // 0, 1, 4, 9, 16
-}
+for await (const v of stream) console.log(v);
 ```
 
-### Retry
+### Priority
 
 ```js
-await beeThreads
-  .run(unreliableTask)
-  .usingParams()
-  .retry({ maxAttempts: 3, baseDelay: 100 })
-  .execute();
+// Critical - first in queue
+beeThreads.run(task).priority('high').execute();
+
+// Background - last in queue
+beeThreads.run(task).priority('low').execute();
 ```
 
-### Curried Functions
-
-Automatically handled:
-
-```js
-const result = await beeThreads
-  .run((a) => (b) => (c) => a + b + c)
-  .usingParams(1, 2, 3)
-  .execute();
-// → 6
-```
-
-## API Reference
-
-### Execution Methods
+## API
 
 | Method | Description |
 |--------|-------------|
-| `run(fn)` | Execute function in worker |
-| `safeRun(fn)` | Like run, never throws |
-| `withTimeout(ms)(fn)` | With time limit |
-| `stream(genFn)` | Stream generator values |
+| `run(fn)` | Execute in worker |
+| `safeRun(fn)` | Never throws |
+| `withTimeout(ms)(fn)` | Time limit |
+| `stream(fn)` | Generator streaming |
 
-### Executor Methods
-
-| Method | Description |
-|--------|-------------|
-| `.usingParams(...args)` | Set function arguments |
-| `.setContext(obj)` | Inject closure variables |
-| `.signal(signal)` | Cancellation support |
-| `.transfer(list)` | Zero-copy ArrayBuffers |
-| `.retry(opts)` | Auto-retry with backoff |
-| `.priority(level)` | Set task priority (`'high'`, `'normal'`, `'low'`) |
-| `.execute()` | Run the function |
-
-### Configuration
+### Executor Chain
 
 | Method | Description |
 |--------|-------------|
-| `configure(opts)` | Set pool options |
-| `warmup(count?)` | Pre-create workers |
-| `getPoolStats()` | Get metrics |
-| `shutdown()` | Terminate all workers |
+| `.usingParams(...args)` | Arguments |
+| `.setContext(obj)` | Inject variables |
+| `.signal(signal)` | Cancellation |
+| `.transfer(list)` | Zero-copy buffers |
+| `.retry(opts)` | Auto-retry |
+| `.priority(level)` | Queue priority |
+| `.execute()` | Run |
 
-## Error Handling
+### Pool
 
-```js
-const { AbortError, TimeoutError, QueueFullError, WorkerError } = require('bee-threads');
-
-try {
-  await beeThreads.run(task).usingParams().execute();
-} catch (err) {
-  if (err instanceof TimeoutError) {
-    console.log(`Timed out after ${err.timeout}ms`);
-  }
-}
-```
+| Method | Description |
+|--------|-------------|
+| `configure(opts)` | Pool settings |
+| `warmup(n)` | Pre-create workers |
+| `shutdown()` | Terminate all |
+| `getPoolStats()` | Metrics |
 
 ## Configuration
 
 ```js
 beeThreads.configure({
   poolSize: 8,              // Max workers
-  minThreads: 2,            // Keep 2 workers always ready
-  maxQueueSize: 500,        // Max pending tasks
-  workerIdleTimeout: 60000, // Cleanup idle workers (ms)
-  retry: { maxAttempts: 5 } // Default retry config
+  minThreads: 2,            // Always-ready workers
+  maxQueueSize: 500,        // Queue limit
+  workerIdleTimeout: 60000  // Idle cleanup (ms)
 });
 
-// Pre-create workers at startup (eliminates cold-start latency)
+// Eliminate cold-start
 await beeThreads.warmup(4);
 ```
 
-### Task Priority
+## Errors
 
 ```js
-// Critical task - processed first
-await beeThreads
-  .run(criticalTask)
-  .priority('high')
-  .execute();
-
-// Background task - processed last
-beeThreads
-  .run(backgroundTask)
-  .priority('low')
-  .execute();
+const { TimeoutError, AbortError, QueueFullError, WorkerError } = require('bee-threads');
 ```
-
-## Why bee-threads?
-
-- ✅ **Inline functions** - Write functions directly, no separate worker files
-- ✅ **Closure injection** - Pass external variables with `.setContext()`
-- ✅ **Fluent API** - Chain methods naturally
-- ✅ **Generators** - Stream values with `beeThreads.stream()`
-- ✅ **AbortSignal** - Cancel tasks with AbortController
-- ✅ **Auto-retry** - Retry failed tasks with exponential backoff
-- ✅ **Curried functions** - Automatic support for curried functions
-- ✅ **Console forwarding** - `console.log` in workers prints to main thread
-- ✅ **TypeScript** - Full type definitions included
-- ✅ **Zero config** - Works out of the box, sensible defaults
-- ✅ **Task priority** - Process critical tasks first with `.priority('high')`
-- ✅ **Warmup** - Pre-create workers with `warmup()` to eliminate cold-start
 
 ## License
 
