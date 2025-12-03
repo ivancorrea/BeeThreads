@@ -1,8 +1,13 @@
 /**
- * @fileoverview Executor builder for bee-threads.
+ * @fileoverview Fluent API builder for bee-threads.
  *
- * This module implements the fluent API builder pattern for task execution.
- * It decouples the user-facing API from the internal execution engine.
+ * This module implements the immutable builder pattern for task execution.
+ * Each method returns a NEW executor instance, allowing safe reuse.
+ *
+ * @example
+ * const base = beeThreads.run(fn).setContext({ API_KEY });
+ * await base.usingParams(1).execute();  // Safe to reuse
+ * await base.usingParams(2).execute();  // Same context, different params
  *
  * @module bee-threads/executor
  * @internal
@@ -64,6 +69,20 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
       if (typeof context !== 'object' || context === null) {
         throw new TypeError('setContext() requires a non-null object');
       }
+      // Validate that context doesn't contain non-serializable values
+      for (const [key, value] of Object.entries(context)) {
+        if (typeof value === 'function') {
+          throw new TypeError(
+            `setContext() key "${key}" contains a function which cannot be serialized. ` +
+            `Convert it to a string first: { ${key}: yourFn.toString() }`
+          );
+        }
+        if (typeof value === 'symbol') {
+          throw new TypeError(
+            `setContext() key "${key}" contains a Symbol which cannot be serialized.`
+          );
+        }
+      }
       return createExecutor<T>({
         fnString,
         options: { ...options, context },
@@ -118,6 +137,10 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
      * Sets the task priority for queue ordering.
      */
     priority(level: Priority): Executor<T> {
+      const validPriorities = ['high', 'normal', 'low'];
+      if (!validPriorities.includes(level)) {
+        throw new TypeError(`Invalid priority "${level}". Use: ${validPriorities.join(', ')}`);
+      }
       return createExecutor<T>({
         fnString,
         options: { ...options, priority: level },

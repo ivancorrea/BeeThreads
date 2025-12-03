@@ -146,9 +146,16 @@ export async function executeOnce<T = unknown>(
           const err = new WorkerError(errMsg.error.message);
           err.name = errMsg.error.name || 'Error';
           if (errMsg.error.stack) err.stack = errMsg.error.stack;
+          // Copy custom error properties (code, statusCode, etc.)
+          const errorData = errMsg.error as unknown as Record<string, unknown>;
+          for (const key of Object.keys(errorData)) {
+            if (!['name', 'message', 'stack', '_sourceCode'].includes(key)) {
+              (err as unknown as Record<string, unknown>)[key] = errorData[key];
+            }
+          }
           // Log code dump in debug mode
-          if (config.debugMode && errMsg.error.code && config.logger) {
-            config.logger.error('[bee-threads] Failed function:\n', errMsg.error.code);
+          if (config.debugMode && errMsg.error._sourceCode && config.logger) {
+            config.logger.error('[bee-threads] Failed function:\n', errMsg.error._sourceCode);
           }
           settle(false, err);
         }
@@ -163,6 +170,13 @@ export async function executeOnce<T = unknown>(
           const err = new WorkerError(msg.error.message);
           err.name = msg.error.name || 'Error';
           if (msg.error.stack) err.stack = msg.error.stack;
+          // Copy custom error properties
+          const errorData = msg.error as unknown as Record<string, unknown>;
+          for (const key of Object.keys(errorData)) {
+            if (!['name', 'message', 'stack'].includes(key)) {
+              (err as unknown as Record<string, unknown>)[key] = errorData[key];
+            }
+          }
           settle(false, err);
         }
       }

@@ -201,8 +201,10 @@ export interface SerializedError {
   name: string;
   message: string;
   stack?: string;
-  /** Original function code (only in debug mode) */
-  code?: string;
+  /** Original function source code (only in debug mode) */
+  _sourceCode?: string;
+  /** Allow custom error properties to be serialized */
+  [key: string]: unknown;
 }
 
 /** Successful result from worker */

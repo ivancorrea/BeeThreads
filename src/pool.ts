@@ -3,10 +3,18 @@
  *
  * Manages the lifecycle of worker threads:
  * - Creating workers with proper configuration
- * - Selecting the best worker for a task (load balancing)
+ * - Selecting the best worker for a task (load balancing + affinity)
  * - Returning workers to the pool after use
  * - Cleaning up idle workers to free resources
  * - Managing temporary overflow workers
+ * - Counter management (busy/idle) with race-condition protection
+ *
+ * Selection Strategy (priority order):
+ * 1. Affinity match - worker already has function cached
+ * 2. Least-used idle - distributes load evenly
+ * 3. Create new pooled - pool not at capacity
+ * 4. Create temporary - overflow handling
+ * 5. Queue task - no resources available
  *
  * @module bee-threads/pool
  * @internal
@@ -74,6 +82,9 @@ export function createWorkerEntry(script: string, poolType: PoolType): WorkerEnt
 
   // Don't block process exit
   worker.unref();
+  
+  // Prevent MaxListenersExceededWarning when many tasks use same worker
+  worker.setMaxListeners(0);
 
   const entry: WorkerEntry = {
     worker,
@@ -203,7 +214,7 @@ export function getWorker(poolType: PoolType, fnHash: string | null = null): Get
   if (pool.length < config.poolSize) {
     const entry = createWorkerEntry(script, poolType);
     entry.busy = true;
-    counters.idle--;
+    // Only increment busy - new worker wasn't idle before
     counters.busy++;
     pool.push(entry);
     return { entry, worker: entry.worker, temporary: false };
@@ -227,6 +238,7 @@ export function getWorker(poolType: PoolType, fnHash: string | null = null): Get
     const tempWorker: TemporaryWorker = new Worker(script, workerOptions);
 
     tempWorker.unref();
+    tempWorker.setMaxListeners(0);  // Prevent MaxListenersExceededWarning
     tempWorker._temporary = true;
     tempWorker._startTime = Date.now();
     metrics.temporaryWorkersCreated++;
@@ -308,7 +320,8 @@ export function releaseWorker(
       clearTimeout(entry.terminationTimer);
     }
     nextTask.resolve({ entry, worker: entry.worker, temporary: false });
-  } else {
+  } else if (entry.busy) {
+    // Only update counters if worker was actually busy
     entry.busy = false;
     counters.busy--;
     counters.idle++;

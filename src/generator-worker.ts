@@ -49,8 +49,18 @@ function createSerializedError(err: Error, source?: string | null): SerializedEr
     stack: err.stack
   };
   
+  // Copy custom error properties (code, statusCode, etc.)
+  for (const key of Object.keys(err)) {
+    if (!['name', 'message', 'stack'].includes(key)) {
+      const value = (err as unknown as Record<string, unknown>)[key];
+      if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) {
+        (serialized as unknown as Record<string, unknown>)[key] = value;
+      }
+    }
+  }
+  
   if (DEBUG_MODE && source) {
-    serialized.code = source;
+    serialized._sourceCode = source;
   }
   
   return serialized;
@@ -121,19 +131,42 @@ function serializeError(e: unknown): SerializedError {
   let serialized: SerializedError;
   
   if (e && typeof e === 'object' && 'name' in e && 'message' in e) {
-    const err = e as { name: string; message: string; stack?: string };
-    serialized = { name: err.name, message: err.message, stack: err.stack };
+    const err = e as Record<string, unknown>;
+    serialized = { 
+      name: String(err.name), 
+      message: String(err.message), 
+      stack: err.stack as string | undefined 
+    };
+    
+    // Copy custom properties (like code, statusCode, etc.)
+    for (const key of Object.keys(err)) {
+      if (!['name', 'message', 'stack'].includes(key)) {
+        const value = err[key];
+        if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) {
+          (serialized as unknown as Record<string, unknown>)[key] = value;
+        }
+      }
+    }
   }
   else if (e instanceof Error) {
     serialized = { name: e.name, message: e.message, stack: e.stack };
+    
+    for (const key of Object.keys(e)) {
+      if (!['name', 'message', 'stack'].includes(key)) {
+        const value = (e as unknown as Record<string, unknown>)[key];
+        if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) {
+          (serialized as unknown as Record<string, unknown>)[key] = value;
+        }
+      }
+    }
   }
   else {
     serialized = { name: 'Error', message: String(e) };
   }
   
-  // Include source code in debug mode
+  // Include source code in debug mode (use _sourceCode to avoid conflict with error.code)
   if (DEBUG_MODE && currentFnSource) {
-    serialized.code = currentFnSource;
+    serialized._sourceCode = currentFnSource;
   }
   
   return serialized;

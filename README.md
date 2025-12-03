@@ -33,7 +33,7 @@ await bee((a, b) => a + b)(10, 20);  // → 30
 
 // External variables (closures)
 const TAX = 0.2;
-await bee((price) => price * (1 + TAX))(100)({ beeClosures: { TAX } });  // → 120
+await bee((price) => price * (1 + TAX))(100, { beeClosures: { TAX } });  // → 120
 ```
 
 ---
@@ -63,6 +63,8 @@ Inject external variables (closures):
 const TAX = 0.2;
 await beeThreads.run((p) => p * (1 + TAX)).usingParams(100).setContext({ TAX }).execute();  // → 120
 ```
+
+> **Note:** Context values must be serializable (no functions or Symbols).
 
 ### `.signal(AbortSignal)`
 Enable cancellation:
@@ -99,6 +101,8 @@ await beeThreads
   .usingParams(data)
   .execute();
 ```
+
+> **Note:** When using `.retry()` with `.withTimeout()`, the timeout applies **per attempt**, not total.
 
 ### Streaming (Generators)
 
@@ -153,7 +157,11 @@ try {
   if (err instanceof TimeoutError) { /* timeout */ }
   if (err instanceof AbortError) { /* cancelled */ }
   if (err instanceof QueueFullError) { /* queue full */ }
-  if (err instanceof WorkerError) { /* worker error */ }
+  if (err instanceof WorkerError) { 
+    // Custom error properties are preserved
+    console.log(err.code);       // e.g., 'ERR_CUSTOM'
+    console.log(err.statusCode); // e.g., 500
+  }
 }
 ```
 
@@ -181,6 +189,14 @@ import { bee, beeThreads } from 'bee-threads';
 
 const result = await bee((x: number) => x * 2)(21);  // number
 ```
+
+---
+
+## Limitations
+
+- **No `this` binding** - Use arrow functions or pass context via `.setContext()`
+- **No closures** - External variables must be passed via `beeClosures` or `.setContext()`
+- **Serializable only** - Arguments and return values must be serializable (no functions, Symbols, or circular refs with classes)
 
 ---
 

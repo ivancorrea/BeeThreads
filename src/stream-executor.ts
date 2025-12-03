@@ -65,6 +65,20 @@ export function createStreamExecutor<T = unknown>(state: StreamExecutorState): S
       if (typeof ctx !== 'object' || ctx === null) {
         throw new TypeError('setContext() requires a non-null object');
       }
+      // Validate that context doesn't contain non-serializable values
+      for (const [key, value] of Object.entries(ctx)) {
+        if (typeof value === 'function') {
+          throw new TypeError(
+            `setContext() key "${key}" contains a function which cannot be serialized. ` +
+            `Convert it to a string first: { ${key}: yourFn.toString() }`
+          );
+        }
+        if (typeof value === 'symbol') {
+          throw new TypeError(
+            `setContext() key "${key}" contains a Symbol which cannot be serialized.`
+          );
+        }
+      }
       return createStreamExecutor<T>({
         fnString,
         context: ctx,
@@ -150,9 +164,16 @@ export function createStreamExecutor<T = unknown>(state: StreamExecutorState): S
                   const err = new WorkerError(msg.error.message);
                   err.name = msg.error.name || 'Error';
                   if (msg.error.stack) err.stack = msg.error.stack;
+                  // Copy custom error properties
+                  const errorData = msg.error as unknown as Record<string, unknown>;
+                  for (const key of Object.keys(errorData)) {
+                    if (!['name', 'message', 'stack', '_sourceCode'].includes(key)) {
+                      (err as unknown as Record<string, unknown>)[key] = errorData[key];
+                    }
+                  }
                   // Log code dump in debug mode
-                  if (config.debugMode && msg.error.code && config.logger) {
-                    config.logger.error('[bee-threads] Failed generator:\n', msg.error.code);
+                  if (config.debugMode && msg.error._sourceCode && config.logger) {
+                    config.logger.error('[bee-threads] Failed generator:\n', msg.error._sourceCode);
                   }
                   controller.error(err);
                   cleanup();

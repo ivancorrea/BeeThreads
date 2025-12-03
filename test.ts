@@ -1006,6 +1006,20 @@ async function runTests(): Promise<void> {
     assert.strictEqual(result, 42);
   });
 
+  await test('setContext() throws for function values', () => {
+    assert.throws(
+      () => beeThreads.run(() => 42).setContext({ fn: () => 1 }),
+      /contains a function which cannot be serialized/
+    );
+  });
+
+  await test('setContext() throws for Symbol values', () => {
+    assert.throws(
+      () => beeThreads.run(() => 42).setContext({ sym: Symbol('test') }),
+      /contains a Symbol which cannot be serialized/
+    );
+  });
+
   // ---------- TRANSFER (ARRAYBUFFER) ----------
   section('Transfer (ArrayBuffer)');
 
@@ -1436,6 +1450,20 @@ async function runTests(): Promise<void> {
     assert.ok(typeof stats.normal.queueByPriority.high === 'number');
     assert.ok(typeof stats.normal.queueByPriority.normal === 'number');
     assert.ok(typeof stats.normal.queueByPriority.low === 'number');
+  });
+
+  await test('priority() throws for invalid priority', () => {
+    assert.throws(
+      () => beeThreads.run(() => 42).priority('ULTRA' as any),
+      /Invalid priority/
+    );
+  });
+
+  await test('priority() throws for unknown priority', () => {
+    assert.throws(
+      () => beeThreads.run(() => 42).priority('critical' as any),
+      TypeError
+    );
   });
 
   await beeThreads.shutdown();
@@ -2026,6 +2054,51 @@ async function runTests(): Promise<void> {
       assert.ok(error.stack, 'Error should have stack trace');
       assert.ok(error.stack.length > 0, 'Stack trace should not be empty');
     }
+  });
+
+  await test('preserves custom error properties', async () => {
+    try {
+      await beeThreads
+        .run(() => {
+          const e = new Error('custom error') as Error & { code: string; statusCode: number };
+          e.code = 'ERR_CUSTOM';
+          e.statusCode = 500;
+          throw e;
+        })
+        .execute();
+      assert.fail('Should have thrown');
+    } catch (err: unknown) {
+      const error = err as Error & { code?: string; statusCode?: number };
+      assert.strictEqual(error.code, 'ERR_CUSTOM', 'Should preserve error.code');
+      assert.strictEqual(error.statusCode, 500, 'Should preserve error.statusCode');
+    }
+  });
+
+  await beeThreads.shutdown();
+
+  // ---------- POOL COUNTER STABILITY ----------
+  section('Pool Counter Stability');
+
+  await test('busy counter stays non-negative after timeouts', async () => {
+    beeThreads.configure({ poolSize: 4, logger: null });
+    await beeThreads.warmup(2);
+    
+    // Execute multiple timeouts
+    for (let i = 0; i < 5; i++) {
+      try {
+        await beeThreads.withTimeout(30)(() => { while(true) {} }).execute();
+      } catch { /* expected */ }
+    }
+    
+    const stats = beeThreads.getPoolStats();
+    assert.ok(stats.normal.busy >= 0, `busy should be >= 0, got ${stats.normal.busy}`);
+    assert.ok(stats.normal.idle >= 0, `idle should be >= 0, got ${stats.normal.idle}`);
+  });
+
+  await test('pool remains functional after many timeouts', async () => {
+    // After timeouts, pool should still work
+    const result = await beeThreads.run(() => 42).execute();
+    assert.strictEqual(result, 42);
   });
 
   await beeThreads.shutdown();
