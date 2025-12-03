@@ -81,6 +81,9 @@ const config = {
   // Worker lifecycle
   workerIdleTimeout: 30000, // 30 seconds
   
+  // Function cache size per worker (for compiled functions)
+  functionCacheSize: 100,
+  
   // V8 resource limits for workers
   resourceLimits: {
     maxOldGenerationSizeMb: 512,

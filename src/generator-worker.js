@@ -9,7 +9,7 @@
 
 'use strict';
 
-const { parentPort } = require('worker_threads');
+const { parentPort, workerData } = require('worker_threads');
 const { createFunctionCache } = require('./cache');
 
 // ============================================================================
@@ -18,9 +18,16 @@ const { createFunctionCache } = require('./cache');
 
 /**
  * LRU cache for compiled generator functions.
- * Avoids repeated eval() calls for the same function.
+ * Uses vm.Script for faster compilation with context.
  */
-const fnCache = createFunctionCache(100);
+const cacheSize = workerData?.functionCacheSize || 100;
+const fnCache = createFunctionCache(cacheSize);
+
+/**
+ * Expose cache for debugging.
+ * Access via: globalThis.BeeCache.stats()
+ */
+globalThis.BeeCache = fnCache;
 
 // ============================================================================
 // CONSOLE REDIRECTION

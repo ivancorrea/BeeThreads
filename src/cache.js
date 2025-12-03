@@ -24,6 +24,8 @@
 
 'use strict';
 
+const vm = require('vm');
+
 /**
  * Default maximum cache size.
  * @type {number}
@@ -259,26 +261,91 @@ function createFunctionCache(maxSize = DEFAULT_MAX_SIZE) {
         return fn;
       }
       
-      // Cache miss - compile
+      // Cache miss - compile with vm.Script (no eval!)
       misses++;
       
-      if (context && Object.keys(context).length > 0) {
-        // Compile with context injection
-        const contextKeys = Object.keys(context);
-        const contextValues = Object.values(context);
-        
-        const wrapperCode = `
-          (function(${contextKeys.join(', ')}) {
-            return (${fnString});
-          })
-        `;
-        
-        const wrapper = eval(wrapperCode);
-        fn = wrapper(...contextValues);
-      } else {
-        // Simple compile
-        fn = eval(`(${fnString})`);
-      }
+      const code = `(${fnString})`;
+      const script = new vm.Script(code, { 
+        filename: 'bee-worker-fn.js',
+        produceCachedData: true // Enable V8 code caching
+      });
+      
+      // Create sandbox with Node.js globals + optional user context
+      const sandbox = { 
+        // User context (if any)
+        ...context,
+        // Node.js globals
+        require,
+        module,
+        exports,
+        console,
+        Buffer,
+        process,
+        setTimeout,
+        setInterval,
+        setImmediate,
+        clearTimeout,
+        clearInterval,
+        clearImmediate,
+        queueMicrotask,
+        __dirname,
+        __filename,
+        // Global constructors
+        Array,
+        Object,
+        String,
+        Number,
+        Boolean,
+        Symbol,
+        BigInt,
+        Function,
+        Date,
+        RegExp,
+        Error,
+        TypeError,
+        RangeError,
+        SyntaxError,
+        Map,
+        Set,
+        WeakMap,
+        WeakSet,
+        Promise,
+        Proxy,
+        Reflect,
+        JSON,
+        Math,
+        Intl,
+        ArrayBuffer,
+        SharedArrayBuffer,
+        DataView,
+        Int8Array,
+        Uint8Array,
+        Uint8ClampedArray,
+        Int16Array,
+        Uint16Array,
+        Int32Array,
+        Uint32Array,
+        Float32Array,
+        Float64Array,
+        BigInt64Array,
+        BigUint64Array,
+        // Utilities
+        encodeURI,
+        encodeURIComponent,
+        decodeURI,
+        decodeURIComponent,
+        isNaN,
+        isFinite,
+        parseFloat,
+        parseInt,
+        URL,
+        URLSearchParams,
+        TextEncoder,
+        TextDecoder
+      };
+      
+      vm.createContext(sandbox);
+      fn = script.runInContext(sandbox);
       
       // Cache the compiled function
       cache.set(cacheKey, fn);

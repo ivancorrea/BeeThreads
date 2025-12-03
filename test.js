@@ -1779,6 +1779,79 @@ async function runTests() {
 
   await beeThreads.shutdown();
 
+  // ---------- FUNCTION CACHE SIZE CONFIG ----------
+  section('functionCacheSize Configuration');
+
+  await test('configure() accepts functionCacheSize', () => {
+    beeThreads.configure({ functionCacheSize: 500 });
+    const stats = beeThreads.getPoolStats();
+    assert.strictEqual(stats.config.functionCacheSize, 500);
+  });
+
+  await test('configure() throws for non-integer functionCacheSize', () => {
+    assert.throws(
+      () => beeThreads.configure({ functionCacheSize: 50.5 }),
+      TypeError
+    );
+  });
+
+  await test('configure() throws for zero functionCacheSize', () => {
+    assert.throws(
+      () => beeThreads.configure({ functionCacheSize: 0 }),
+      TypeError
+    );
+  });
+
+  await test('configure() throws for negative functionCacheSize', () => {
+    assert.throws(
+      () => beeThreads.configure({ functionCacheSize: -10 }),
+      TypeError
+    );
+  });
+
+  beeThreads.configure({ functionCacheSize: 100 }); // Reset
+
+  // ---------- VM.SCRIPT OPTIMIZATION ----------
+  section('vm.Script Optimization (context)');
+
+  await test('vm.Script compiles with context correctly', async () => {
+    const MULT = 100;
+    const result = await beeThreads
+      .run((x) => x * MULT)
+      .setContext({ MULT })
+      .usingParams(5)
+      .execute();
+    assert.strictEqual(result, 500);
+  });
+
+  await test('vm.Script provides require in context', async () => {
+    const PREFIX = 'hash:';
+    const result = await beeThreads
+      .run((data) => {
+        const crypto = require('crypto');
+        return PREFIX + crypto.createHash('md5').update(data).digest('hex').slice(0, 8);
+      })
+      .setContext({ PREFIX })
+      .usingParams('test')
+      .execute();
+    assert.ok(result.startsWith('hash:'));
+    assert.strictEqual(result.length, 13); // 'hash:' + 8 hex chars
+  });
+
+  await test('vm.Script works with complex context', async () => {
+    const config = { multiplier: 3, prefix: '>' };
+    const items = [1, 2, 3];
+    
+    const result = await beeThreads
+      .run(() => items.map(i => config.prefix + (i * config.multiplier)).join(','))
+      .setContext({ config, items })
+      .execute();
+    
+    assert.strictEqual(result, '>3,>6,>9');
+  });
+
+  await beeThreads.shutdown();
+
   // ---------- CLEANUP ----------
   section('Cleanup');
 

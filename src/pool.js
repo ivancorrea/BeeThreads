@@ -91,9 +91,13 @@ function fastHash(str) {
  * @internal
  */
 function createWorkerEntry(script, poolType) {
-  const workerOptions = config.resourceLimits 
-    ? { resourceLimits: config.resourceLimits } 
-    : {};
+  const workerOptions = {
+    workerData: { functionCacheSize: config.functionCacheSize }
+  };
+  
+  if (config.resourceLimits) {
+    workerOptions.resourceLimits = config.resourceLimits;
+  }
   
   const worker = new Worker(script, workerOptions);
   
@@ -282,9 +286,12 @@ function getWorker(poolType, fnHash = null) {
   // STRATEGY 3: Create temporary worker
   // ─────────────────────────────────────────────────────────────────────────
   if (metrics.activeTemporaryWorkers < config.maxTemporaryWorkers) {
-    const workerOptions = config.resourceLimits 
-      ? { resourceLimits: config.resourceLimits } 
-      : {};
+    const workerOptions = {
+      workerData: { functionCacheSize: config.functionCacheSize }
+    };
+    if (config.resourceLimits) {
+      workerOptions.resourceLimits = config.resourceLimits;
+    }
     const tempWorker = new Worker(script, workerOptions);
     
     // Don't block process exit

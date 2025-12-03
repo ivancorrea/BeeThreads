@@ -537,6 +537,12 @@ const beeThreads = {
     if (options.retry !== undefined) {
       config.retry = { ...config.retry, ...options.retry };
     }
+    if (options.functionCacheSize !== undefined) {
+      if (!Number.isInteger(options.functionCacheSize) || options.functionCacheSize < 1) {
+        throw new TypeError('functionCacheSize must be a positive integer');
+      }
+      config.functionCacheSize = options.functionCacheSize;
+    }
   },
 
   // ──────────────────────────────────────────────────────────────────────────
