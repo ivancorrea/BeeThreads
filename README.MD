@@ -54,42 +54,172 @@ await bee((price) => price * (1 + TAX))(100)({ beeClosures: { TAX } })
 
 ## `beeThreads` — Full API
 
+### `.usingParams(...args)` — Pass arguments
+
 ```js
-await beeThreads.run(fn).execute()
-await beeThreads.run(fn).usingParams(args).execute()
-await beeThreads.run(fn).usingParams(args).setContext({ VAR }).execute()
+const sum = await beeThreads
+  .run((a, b, c) => a + b + c)
+  .usingParams(10, 20, 30)
+  .execute();
+// → 60
 ```
 
-### Methods
+### `.setContext(obj)` — Inject external variables
 
-| Method | Description |
-|--------|-------------|
-| `.usingParams(...args)` | Pass arguments |
-| `.setContext(obj)` | Inject external variables |
-| `.signal(AbortSignal)` | Cancellation |
-| `.transfer([ArrayBuffer])` | Zero-copy transfer |
-| `.retry({ attempts })` | Auto-retry |
-| `.priority('high'\|'low')` | Queue priority |
-| `.execute()` | Run |
+```js
+const TAX_RATE = 0.2;
+const DISCOUNT = 0.1;
 
-### Variants
+const finalPrice = await beeThreads
+  .run((price) => price * (1 + TAX_RATE) * (1 - DISCOUNT))
+  .usingParams(100)
+  .setContext({ TAX_RATE, DISCOUNT })
+  .execute();
+// → 108
+```
 
-| Method | Description |
-|--------|-------------|
-| `beeThreads.run(fn)` | Normal execution |
-| `beeThreads.safeRun(fn)` | Never throws — returns `{ status, value/error }` like `Promise.allSettled` |
-| `beeThreads.withTimeout(ms)(fn)` | Execution with timeout |
-| `beeThreads.stream(generatorFn)` | Async iterator from generator |
+### `.signal(AbortSignal)` — Cancellation
+
+```js
+const controller = new AbortController();
+
+// Cancel after 1 second
+setTimeout(() => controller.abort(), 1000);
+
+try {
+  await beeThreads
+    .run(() => { while(true) {} }) // infinite loop
+    .signal(controller.signal)
+    .execute();
+} catch (err) {
+  console.log(err.name); // 'AbortError'
+}
+```
+
+### `.transfer([ArrayBuffer])` — Zero-copy transfer
+
+```js
+const buffer = new ArrayBuffer(1024 * 1024); // 1MB
+
+const result = await beeThreads
+  .run((buf) => {
+    const view = new Uint8Array(buf);
+    view.fill(42);
+    return buf;
+  })
+  .usingParams(buffer)
+  .transfer([buffer]) // zero-copy, buffer is moved not copied
+  .execute();
+```
+
+### `.retry({ attempts })` — Auto-retry
+
+```js
+const result = await beeThreads
+  .run(() => {
+    if (Math.random() < 0.5) throw new Error('Transient failure');
+    return 'success';
+  })
+  .retry({ 
+    attempts: 3,      // max retries
+    delay: 100,       // initial delay ms
+    backoff: 2        // exponential backoff multiplier
+  })
+  .execute();
+```
+
+### `.priority('high'|'normal'|'low')` — Queue priority
+
+```js
+// Critical task - jumps to front of queue
+await beeThreads
+  .run(processPayment)
+  .usingParams(paymentData)
+  .priority('high')
+  .execute();
+
+// Background task - processed last
+await beeThreads
+  .run(generateReport)
+  .usingParams(reportData)
+  .priority('low')
+  .execute();
+```
+
+---
+
+## Variants
+
+### `beeThreads.safeRun(fn)` — Never throws
+
+Returns `{ status, value/error }` like `Promise.allSettled`:
+
+```js
+const result = await beeThreads
+  .safeRun(() => JSON.parse('invalid json'))
+  .execute();
+
+if (result.status === 'fulfilled') {
+  console.log(result.value);
+} else {
+  console.error(result.error); // SyntaxError
+}
+```
+
+### `beeThreads.withTimeout(ms)(fn)` — Execution with timeout
+
+```js
+try {
+  await beeThreads
+    .withTimeout(5000)((data) => heavyComputation(data))
+    .usingParams(largeDataset)
+    .execute();
+} catch (err) {
+  console.log(err.name); // 'TimeoutError'
+}
+```
+
+### `beeThreads.stream(generatorFn)` — Async iterator
+
+```js
+const stream = beeThreads
+  .stream(function* (start, end) {
+    for (let i = start; i <= end; i++) {
+      yield i * i; // yields squares
+    }
+  })
+  .usingParams(1, 5)
+  .execute();
+
+for await (const square of stream) {
+  console.log(square);
+}
+// → 1, 4, 9, 16, 25
+```
 
 ---
 
 ## Pool
 
 ```js
-beeThreads.configure({ poolSize: 8, minThreads: 2 });
-await beeThreads.warmup(4);   // pre-create workers
-await beeThreads.shutdown();  // terminate all
-beeThreads.getPoolStats();    // metrics
+// Configure pool
+beeThreads.configure({ 
+  poolSize: 8,           // max workers
+  minThreads: 2,         // always-ready workers
+  maxQueueSize: 100,     // max pending tasks
+  workerIdleTimeout: 60000 // cleanup idle workers after 60s
+});
+
+// Pre-warm workers (eliminates cold-start)
+await beeThreads.warmup(4);
+
+// Get metrics
+const stats = beeThreads.getPoolStats();
+console.log(stats.normal.busy);  // workers currently busy
+console.log(stats.normal.idle);  // workers available
+
+// Graceful shutdown
+await beeThreads.shutdown();
 ```
 
 ---
@@ -98,6 +228,11 @@ beeThreads.getPoolStats();    // metrics
 
 ```js
 const { TimeoutError, AbortError, QueueFullError, WorkerError } = require('bee-threads');
+
+// TimeoutError - task exceeded timeout
+// AbortError - task was cancelled via AbortSignal
+// QueueFullError - queue at maxQueueSize capacity
+// WorkerError - worker crashed or threw error
 ```
 
 ---
