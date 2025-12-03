@@ -1,6 +1,7 @@
 // test.js - bee-threads test suite
 const assert = require('assert');
 const { bee, beeThreads, AbortError, TimeoutError, QueueFullError, WorkerError } = require('./src/index.js');
+const { createLRUCache, createFunctionCache } = require('./src/cache.js');
 
 // Test utilities
 let passed = 0;
@@ -1489,6 +1490,169 @@ async function runTests() {
     assert.ok(typeof stats.normal.queueByPriority.high === 'number');
     assert.ok(typeof stats.normal.queueByPriority.normal === 'number');
     assert.ok(typeof stats.normal.queueByPriority.low === 'number');
+  });
+
+  await beeThreads.shutdown();
+
+  // ---------- LRU CACHE ----------
+  section('LRU Cache');
+
+  await test('createLRUCache() creates cache with default size', () => {
+    const cache = createLRUCache();
+    assert.strictEqual(cache.size(), 0);
+    assert.strictEqual(cache.stats().maxSize, 100);
+  });
+
+  await test('createLRUCache(n) creates cache with custom size', () => {
+    const cache = createLRUCache(50);
+    assert.strictEqual(cache.stats().maxSize, 50);
+  });
+
+  await test('cache.set() and cache.get() work correctly', () => {
+    const cache = createLRUCache(10);
+    cache.set('key1', 'value1');
+    assert.strictEqual(cache.get('key1'), 'value1');
+    assert.strictEqual(cache.size(), 1);
+  });
+
+  await test('cache.has() checks existence without updating LRU', () => {
+    const cache = createLRUCache(10);
+    cache.set('key1', 'value1');
+    assert.strictEqual(cache.has('key1'), true);
+    assert.strictEqual(cache.has('nonexistent'), false);
+  });
+
+  await test('cache.get() returns undefined for missing keys', () => {
+    const cache = createLRUCache(10);
+    assert.strictEqual(cache.get('nonexistent'), undefined);
+  });
+
+  await test('cache evicts LRU entry when full', () => {
+    const cache = createLRUCache(3);
+    cache.set('a', 1);
+    cache.set('b', 2);
+    cache.set('c', 3);
+    // Cache is full: [c, b, a]
+    
+    cache.set('d', 4); // Should evict 'a'
+    
+    assert.strictEqual(cache.has('a'), false, 'a should be evicted');
+    assert.strictEqual(cache.has('b'), true);
+    assert.strictEqual(cache.has('c'), true);
+    assert.strictEqual(cache.has('d'), true);
+  });
+
+  await test('cache.get() moves entry to most recent', () => {
+    const cache = createLRUCache(3);
+    cache.set('a', 1);
+    cache.set('b', 2);
+    cache.set('c', 3);
+    // Order: [c, b, a]
+    
+    cache.get('a'); // Move 'a' to most recent
+    // Order: [a, c, b]
+    
+    cache.set('d', 4); // Should evict 'b' (now oldest)
+    
+    assert.strictEqual(cache.has('b'), false, 'b should be evicted');
+    assert.strictEqual(cache.has('a'), true, 'a should still exist');
+  });
+
+  await test('cache.clear() removes all entries', () => {
+    const cache = createLRUCache(10);
+    cache.set('a', 1);
+    cache.set('b', 2);
+    cache.clear();
+    assert.strictEqual(cache.size(), 0);
+  });
+
+  // ---------- FUNCTION CACHE ----------
+  section('Function Cache');
+
+  await test('createFunctionCache() creates function cache', () => {
+    const cache = createFunctionCache();
+    assert.ok(cache.getOrCompile);
+    assert.ok(cache.stats);
+    assert.ok(cache.clear);
+  });
+
+  await test('fnCache.getOrCompile() compiles function', () => {
+    const cache = createFunctionCache();
+    const fn = cache.getOrCompile('(x) => x * 2');
+    assert.strictEqual(typeof fn, 'function');
+    assert.strictEqual(fn(21), 42);
+  });
+
+  await test('fnCache.getOrCompile() returns cached function', () => {
+    const cache = createFunctionCache();
+    const fn1 = cache.getOrCompile('(x) => x * 2');
+    const fn2 = cache.getOrCompile('(x) => x * 2');
+    assert.strictEqual(fn1, fn2, 'Should return same function instance');
+  });
+
+  await test('fnCache.getOrCompile() with context compiles correctly', () => {
+    const cache = createFunctionCache();
+    const fn = cache.getOrCompile('(x) => x * MULT', { MULT: 10 });
+    assert.strictEqual(fn(5), 50);
+  });
+
+  await test('fnCache.stats() tracks hits and misses', () => {
+    const cache = createFunctionCache();
+    cache.getOrCompile('() => 1'); // miss
+    cache.getOrCompile('() => 1'); // hit
+    cache.getOrCompile('() => 1'); // hit
+    cache.getOrCompile('() => 2'); // miss
+    
+    const stats = cache.stats();
+    assert.strictEqual(stats.hits, 2);
+    assert.strictEqual(stats.misses, 2);
+    assert.strictEqual(stats.hitRate, '50.0%');
+  });
+
+  // ---------- CACHE INTEGRATION ----------
+  section('Cache Integration (bee-threads)');
+
+  await test('repeated bee() calls benefit from cache', async () => {
+    const fn = (x) => x * 2;
+    
+    // Run same function multiple times
+    const results = await Promise.all([
+      bee(fn)(1),
+      bee(fn)(2),
+      bee(fn)(3),
+      bee(fn)(4),
+      bee(fn)(5),
+    ]);
+    
+    assert.deepStrictEqual(results, [2, 4, 6, 8, 10]);
+  });
+
+  await test('repeated beeThreads calls benefit from cache', async () => {
+    // Run same function multiple times
+    const results = [];
+    for (let i = 0; i < 5; i++) {
+      const r = await beeThreads.run((x) => x * 3).usingParams(i).execute();
+      results.push(r);
+    }
+    
+    assert.deepStrictEqual(results, [0, 3, 6, 9, 12]);
+  });
+
+  await test('stream generator benefits from cache', async () => {
+    const results1 = [];
+    const stream1 = beeThreads.stream(function* (n) {
+      for (let i = 0; i < n; i++) yield i;
+    }).usingParams(3).execute();
+    for await (const v of stream1) results1.push(v);
+    
+    const results2 = [];
+    const stream2 = beeThreads.stream(function* (n) {
+      for (let i = 0; i < n; i++) yield i;
+    }).usingParams(3).execute();
+    for await (const v of stream2) results2.push(v);
+    
+    assert.deepStrictEqual(results1, [0, 1, 2]);
+    assert.deepStrictEqual(results2, [0, 1, 2]);
   });
 
   await beeThreads.shutdown();

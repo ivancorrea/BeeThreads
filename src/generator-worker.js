@@ -10,6 +10,17 @@
 'use strict';
 
 const { parentPort } = require('worker_threads');
+const { createFunctionCache } = require('./cache');
+
+// ============================================================================
+// FUNCTION CACHE
+// ============================================================================
+
+/**
+ * LRU cache for compiled generator functions.
+ * Avoids repeated eval() calls for the same function.
+ */
+const fnCache = createFunctionCache(100);
 
 // ============================================================================
 // CONSOLE REDIRECTION
@@ -114,24 +125,8 @@ parentPort.on('message', ({ fn: src, args, context }) => {
     // Step 1: Validate function source
     validateFunctionSource(src);
     
-    let fn;
-    
-    // Step 2: Compile with optional context injection (same as worker.js)
-    if (context && Object.keys(context).length > 0) {
-      const contextKeys = Object.keys(context);
-      const contextValues = Object.values(context);
-      
-      const wrapperCode = `
-        (function(${contextKeys.join(', ')}) {
-          return (${src});
-        })
-      `;
-      
-      const wrapper = eval(wrapperCode);
-      fn = wrapper(...contextValues);
-    } else {
-      fn = eval(`(${src})`);
-    }
+    // Step 2: Get compiled function from cache (or compile and cache it)
+    const fn = fnCache.getOrCompile(src, context);
     
     if (typeof fn !== 'function') {
       throw new TypeError('Evaluated source did not produce a function');

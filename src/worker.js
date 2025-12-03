@@ -13,6 +13,18 @@
 'use strict';
 
 const { parentPort } = require('worker_threads');
+const { createFunctionCache } = require('./cache');
+
+// ============================================================================
+// FUNCTION CACHE
+// ============================================================================
+
+/**
+ * LRU cache for compiled functions.
+ * Avoids repeated eval() calls for the same function.
+ * Also allows V8 to optimize hot functions.
+ */
+const fnCache = createFunctionCache(100);
 
 // ============================================================================
 // CONSOLE REDIRECTION
@@ -153,24 +165,8 @@ parentPort.on('message', ({ fn: src, args, context }) => {
   try {
     validateFunctionSource(src);
     
-    let fn;
-    
-    // Compile with optional context injection
-    if (context && Object.keys(context).length > 0) {
-      const contextKeys = Object.keys(context);
-      const contextValues = Object.values(context);
-      
-      const wrapperCode = `
-        (function(${contextKeys.join(', ')}) {
-          return (${src});
-        })
-      `;
-      
-      const wrapper = eval(wrapperCode);
-      fn = wrapper(...contextValues);
-    } else {
-      fn = eval(`(${src})`);
-    }
+    // Get compiled function from cache (or compile and cache it)
+    const fn = fnCache.getOrCompile(src, context);
     
     if (typeof fn !== 'function') {
       throw new TypeError('Evaluated source did not produce a function');
