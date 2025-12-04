@@ -233,18 +233,21 @@ export function createLRUCache<T>(maxSize: number = DEFAULT_MAX_SIZE, ttl: numbe
       if (timeToLive > 0) {
         expiresAt = Date.now() + timeToLive;
         timeoutId = setTimeout(() => {
-          const entry = cache?.get(key);
-          if (entry?.expiresAt && Date.now() >= entry.expiresAt) {
+          // Timer callback - entry should be expired, just delete it
+          // No need to re-check expiresAt since timer fired at the right time
+          if (cache.has(key)) {
+            const entry = cache.get(key);
+            if (entry?.timeoutId) clearTimeout(entry.timeoutId);
             cache.delete(key);
           }
-        }, timeToLive + 1000); // Extra 1s to ensure expiration
+        }, timeToLive);
       }
 
       // Delete first to update position and set again
       this.delete(key);
 
       // Insert new entry with optional expiration
-      cache.set(key, { value, expiresAt, timeoutId});
+      cache.set(key, { value, expiresAt, timeoutId });
 
       // Evict least-recently-used if over max size
       if (cache.size > maxSize) {
@@ -337,39 +340,39 @@ function fastHash(str: string): string {
  */
 function createContextKey(context: unknown, level: number = 0): string {
   if (context === undefined) {
-    return '' // Undefined as empty string
+    return ''; // Undefined as empty string
   }
-	if (context === null || ['string', 'number', 'boolean'].includes(typeof context)) {
-    return String(context) // Primitive as string
+  if (context === null || ['string', 'number', 'boolean'].includes(typeof context)) {
+    return String(context); // Primitive as string
   }
-	if (context instanceof Date) {
-    return String(context.getTime()) // Date as timestamp
+  if (context instanceof Date) {
+    return String(context.getTime()); // Date as timestamp
   }
-	if (typeof context == 'function') {
-    return fastHash(context.toString()) // Hash function source
+  if (typeof context === 'function') {
+    return fastHash(context.toString()); // Hash function source
   }
-	if (level >= 10) {
-    return fastHash(JSON.stringify(context)) // Prevent too deep recursion
+  if (level >= 10) {
+    return fastHash(JSON.stringify(context)); // Prevent too deep recursion
   }
 
   // Increase level for nested structures
-  level++; 
+  level++;
 
   // Handle arrays recursively. Return string as "[item1,item2,...]"
   if (Array.isArray(context)) {
-    return '['+ context.reduce((str, item) => `${(str && str+',') + createContextKey(item, level)}`, '') + ']'
+    return '[' + context.map(item => createContextKey(item, level)).filter(Boolean).join(',') + ']';
   }
 
-	const keys = Object.keys(context) as Array<keyof typeof context>
-	if (!keys.length) return ''
+  const keys = Object.keys(context) as Array<keyof typeof context>;
+  if (!keys.length) return '';
 
-  // Handle objects recursively. Sort for deterministic ordering. Return string as "{key1:val1&key2:val2&...}"
-  return '{' + 
-    keys.sort().reduce((str, key) => {
-		  const value = createContextKey(context[key], level)
-		  return !value ? str : `${(str && str+'&') + key}:${value}`
-	  }, '')
-  + '}'
+  // Handle objects recursively. Sort for deterministic ordering.
+  const parts = keys.sort().map(key => {
+    const value = createContextKey(context[key], level);
+    return value ? `${key}:${value}` : '';
+  }).filter(Boolean);
+
+  return '{' + parts.join('&') + '}';
 }
 
 /**
