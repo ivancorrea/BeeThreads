@@ -380,8 +380,8 @@ function createContextKey(context: unknown, level: number = 0): string {
  * @param maxSize - Maximum cached functions
  * @returns Function cache with getOrCompile, clear, stats methods
  */
-export function createFunctionCache(maxSize: number = DEFAULT_MAX_SIZE): FunctionCache {
-  const cache = createLRUCache<Function>(maxSize);
+export function createFunctionCache(maxSize: number = DEFAULT_MAX_SIZE, ttl = DEFAULT_TTL): FunctionCache {
+  const cache = createLRUCache<Function>(maxSize, ttl);
 
   // Stats for monitoring
   let hits = 0;
