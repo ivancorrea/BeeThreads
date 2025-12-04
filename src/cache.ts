@@ -206,10 +206,8 @@ export function createLRUCache<T>(maxSize: number = DEFAULT_MAX_SIZE, ttl: numbe
       const entry = cache.get(key);
       if(entry === undefined) return undefined;
 
-      const { expiresAt } = entry;
-
       // Entry expired. If ttl isn't set, it never expires
-      if (expiresAt && (Date.now() >= expiresAt)) {
+      if (entry.expiresAt && (Date.now() >= entry.expiresAt)) {
         this.delete(key, entry);
         return undefined;
       }
