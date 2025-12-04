@@ -204,19 +204,19 @@ export function createLRUCache<T>(maxSize: number = DEFAULT_MAX_SIZE, ttl: numbe
      */
     get(key: string): T | undefined {     
       const entry = cache.get(key);
+      if(entry === undefined) return undefined;
 
-      if(entry !== undefined) {
-        const { expiresAt } = entry;
+      const { expiresAt } = entry;
 
-        // Entry expired. If ttl isn't set, it never expires
-        if (expiresAt && (Date.now() >= expiresAt)) {
-          this.delete(key, entry);
-          return undefined;
-        }
-
-        // Move to end (most recent) by re-inserting
-        this.set(key, entry.value, ttl);
+      // Entry expired. If ttl isn't set, it never expires
+      if (expiresAt && (Date.now() >= expiresAt)) {
+        this.delete(key, entry);
+        return undefined;
       }
+
+      // Move to end (most recent) by re-inserting
+      cache.delete(key);
+      cache.set(key, entry);
 
       return entry?.value;
     },
