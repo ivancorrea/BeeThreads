@@ -36,10 +36,13 @@
  */
 
 import * as vm from 'vm';
-import type { LRUCache, FunctionCache, FunctionCacheStats } from './types';
+import type { LRUCache, FunctionCache, FunctionCacheStats, LRUCacheEntry } from './types';
 
 /** Default maximum cache size */
 export const DEFAULT_MAX_SIZE = 100;
+
+/** Default TTL for cache entries in milliseconds */
+export const DEFAULT_TTL = 0; // 0 = no expiration
 
 // ============================================================================
 // SANDBOX POOL (Memory Optimization)
@@ -188,47 +191,68 @@ function createSandbox(context?: Record<string, unknown> | null): Record<string,
  * 2. On set: if full, delete first entry (least recent)
  *
  * @param maxSize - Maximum number of entries
+ * @param ttl - Time-to-live for entries in milliseconds (Default = 0 - no expiration)
  * @returns Cache instance with get, set, has, clear, size methods
  */
-export function createLRUCache<T>(maxSize: number = DEFAULT_MAX_SIZE): LRUCache<T> {
-  const cache = new Map<string, T>();
+export function createLRUCache<T>(maxSize: number = DEFAULT_MAX_SIZE, ttl: number = DEFAULT_TTL): LRUCache<T> {
+  const cache = new Map<string, LRUCacheEntry<T>>();
 
   return {
     /**
      * Gets a value from the cache.
      * If found, moves entry to most-recently-used position.
      */
-    get(key: string): T | undefined {
-      if (!cache.has(key)) {
-        return undefined;
+    get(key: string): T | undefined {     
+      const entry = cache.get(key);
+
+      if(entry !== undefined) {
+        const { expiresAt } = entry;
+
+        // Entry expired. If ttl isn't set, it never expires
+        if (expiresAt && (Date.now() >= expiresAt)) {
+          this.delete(key, entry);
+          return undefined;
+        }
+
+        // Move to end (most recent) by re-inserting
+        this.set(key, entry.value, ttl);
       }
 
-      // Move to end (most recent) by re-inserting
-      const value = cache.get(key)!;
-      cache.delete(key);
-      cache.set(key, value);
-
-      return value;
+      return entry?.value;
     },
 
     /**
      * Sets a value in the cache.
      * If cache is full, evicts least-recently-used entry.
      */
-    set(key: string, value: T): void {
-      // If key exists, delete first to update position
-      if (cache.has(key)) {
-        cache.delete(key);
-      }
-      // Evict oldest if at capacity
-      else if (cache.size >= maxSize) {
-        const oldestKey = cache.keys().next().value;
-        if (oldestKey !== undefined) {
-          cache.delete(oldestKey);
-        }
+    set(key: string, value: T, timeToLive: number = ttl): void {
+      let expiresAt: number | undefined;
+      let timeoutId: NodeJS.Timeout | undefined;
+
+      // Schedule expiration timer if TTL is set
+      if (timeToLive > 0) {
+        expiresAt = Date.now() + timeToLive;
+        timeoutId = setTimeout(() => {
+          const entry = cache?.get(key);
+          if (entry?.expiresAt && Date.now() >= entry.expiresAt) {
+            cache.delete(key);
+          }
+        }, timeToLive + 1000); // Extra 1s to ensure expiration
       }
 
-      cache.set(key, value);
+      // Delete first to update position and set again
+      this.delete(key);
+
+      // Insert new entry with optional expiration
+      cache.set(key, { value, expiresAt, timeoutId});
+
+      // Evict least-recently-used if over max size
+      if (cache.size > maxSize) {
+        const oldestKey = cache.keys().next().value;
+        if (oldestKey !== undefined) {
+          this.delete(oldestKey);
+        }
+      }
     },
 
     /**
@@ -240,9 +264,25 @@ export function createLRUCache<T>(maxSize: number = DEFAULT_MAX_SIZE): LRUCache<
     },
 
     /**
+     * Deletes an entry from the cache.
+     * Also cancels any pending expiration timer.
+     */
+    delete(key: string, entry?: LRUCacheEntry<T>) {
+      entry ??= cache.get(key);
+      if (entry?.timeoutId) clearTimeout(entry.timeoutId);
+
+      cache.delete(key);
+    },
+
+    /**
      * Clears all entries from the cache.
+     * Also cancels all pending expiration timers.
      */
     clear(): void {
+      // Cancel all pending timers before clearing
+      for (const entry of cache.values()) {
+        if (entry.timeoutId) clearTimeout(entry.timeoutId);
+      }
       cache.clear();
     },
 
@@ -256,10 +296,11 @@ export function createLRUCache<T>(maxSize: number = DEFAULT_MAX_SIZE): LRUCache<
     /**
      * Returns cache statistics.
      */
-    stats(): { size: number; maxSize: number } {
+    stats() {
       return {
         size: cache.size,
-        maxSize
+        maxSize,
+        ttl,
       };
     }
   };
@@ -294,36 +335,41 @@ function fastHash(str: string): string {
  * @returns Context key
  * @internal
  */
-function createContextKey(context: Record<string, unknown> | null | undefined): string {
-  if (!context) return '';
-
-  const keys = Object.keys(context);
-  if (keys.length === 0) return '';
-
-  // Sort keys for deterministic ordering
-  keys.sort();
-
-  const parts: string[] = [];
-  for (const key of keys) {
-    const value = context[key];
-    const type = typeof value;
-
-    // Create type-specific representation
-    if (value === null) {
-      parts.push(`${key}:null`);
-    } else if (type === 'function') {
-      // For functions, use a hash of the source
-      parts.push(`${key}:fn:${fastHash((value as Function).toString())}`);
-    } else if (type === 'object') {
-      // For objects/arrays, use a hash of JSON (only for cache key)
-      parts.push(`${key}:obj:${fastHash(JSON.stringify(value))}`);
-    } else {
-      // Primitives: include value directly (fast for small values)
-      parts.push(`${key}:${type}:${String(value)}`);
-    }
+function createContextKey(context: unknown, level: number = 0): string {
+  if (context === undefined) {
+    return '' // Undefined as empty string
+  }
+	if (context === null || ['string', 'number', 'boolean'].includes(typeof context)) {
+    return String(context) // Primitive as string
+  }
+	if (context instanceof Date) {
+    return String(context.getTime()) // Date as timestamp
+  }
+	if (typeof context == 'function') {
+    return fastHash(context.toString()) // Hash function source
+  }
+	if (level >= 10) {
+    return fastHash(JSON.stringify(context)) // Prevent too deep recursion
   }
 
-  return parts.join('|');
+  // Increase level for nested structures
+  level++; 
+
+  // Handle arrays recursively. Return string as "[item1,item2,...]"
+  if (Array.isArray(context)) {
+    return '['+ context.reduce((str, item) => `${(str && str+',') + createContextKey(item, level)}`, '') + ']'
+  }
+
+	const keys = Object.keys(context) as Array<keyof typeof context>
+	if (!keys.length) return ''
+
+  // Handle objects recursively. Sort for deterministic ordering. Return string as "{key1:val1&key2:val2&...}"
+  return '{' + 
+    keys.sort().reduce((str, key) => {
+		  const value = createContextKey(context[key], level)
+		  return !value ? str : `${(str && str+'&') + key}:${value}`
+	  }, '')
+  + '}'
 }
 
 /**
@@ -336,8 +382,8 @@ function createContextKey(context: Record<string, unknown> | null | undefined): 
  * @param maxSize - Maximum cached functions
  * @returns Function cache with getOrCompile, clear, stats methods
  */
-export function createFunctionCache(maxSize: number = DEFAULT_MAX_SIZE): FunctionCache {
-  const cache = createLRUCache<Function>(maxSize);
+export function createFunctionCache(maxSize: number = DEFAULT_MAX_SIZE, ttl = DEFAULT_TTL): FunctionCache {
+  const cache = createLRUCache<Function>(maxSize, ttl);
 
   // Stats for monitoring
   let hits = 0;

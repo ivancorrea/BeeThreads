@@ -25,6 +25,7 @@ const port = parentPort;
 
 interface WorkerConfig {
   functionCacheSize?: number;
+  functionCacheTTL?: number;
   lowMemoryMode?: boolean;
   debugMode?: boolean;
 }
@@ -94,7 +95,8 @@ process.on('unhandledRejection', (reason: unknown) => {
 // ============================================================================
 
 const cacheSize = workerConfig.functionCacheSize || 100;
-const fnCache: FunctionCache = createFunctionCache(cacheSize);
+const cacheTTL = workerConfig.functionCacheTTL ?? 0;
+const fnCache: FunctionCache = createFunctionCache(cacheSize, cacheTTL);
 
 /** Expose cache for debugging */
 (globalThis as Record<string, unknown>).BeeCache = fnCache;
