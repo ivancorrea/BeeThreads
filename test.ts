@@ -1483,26 +1483,26 @@ async function runTests(): Promise<void> {
   });
 
   await test('cache.set() and cache.get() work correctly', () => {
-    const cache = createLRUCache<string, string>(10);
+    const cache = createLRUCache<string>(10);
     cache.set('key1', 'value1');
     assert.strictEqual(cache.get('key1'), 'value1');
     assert.strictEqual(cache.size(), 1);
   });
 
   await test('cache.has() checks existence without updating LRU', () => {
-    const cache = createLRUCache<string, string>(10);
+    const cache = createLRUCache<string>(10);
     cache.set('key1', 'value1');
     assert.strictEqual(cache.has('key1'), true);
     assert.strictEqual(cache.has('nonexistent'), false);
   });
 
   await test('cache.get() returns undefined for missing keys', () => {
-    const cache = createLRUCache<string, string>(10);
+    const cache = createLRUCache<string>(10);
     assert.strictEqual(cache.get('nonexistent'), undefined);
   });
 
   await test('cache evicts LRU entry when full', () => {
-    const cache = createLRUCache<string, number>(3);
+    const cache = createLRUCache<number>(3);
     cache.set('a', 1);
     cache.set('b', 2);
     cache.set('c', 3);
@@ -1517,7 +1517,7 @@ async function runTests(): Promise<void> {
   });
 
   await test('cache.get() moves entry to most recent', () => {
-    const cache = createLRUCache<string, number>(3);
+    const cache = createLRUCache<number>(3);
     cache.set('a', 1);
     cache.set('b', 2);
     cache.set('c', 3);
@@ -1533,11 +1533,40 @@ async function runTests(): Promise<void> {
   });
 
   await test('cache.clear() removes all entries', () => {
-    const cache = createLRUCache<string, number>(10);
+    const cache = createLRUCache<number>(10);
     cache.set('a', 1);
     cache.set('b', 2);
     cache.clear();
     assert.strictEqual(cache.size(), 0);
+  });
+
+  await test('cache with TTL expires entries', async () => {
+    const cache = createLRUCache<number>(10, 100); // 100ms TTL
+    cache.set('a', 1);
+    assert.strictEqual(cache.get('a'), 1);
+    
+    // Wait for TTL to expire
+    await new Promise(resolve => setTimeout(resolve, 150));
+    
+    // Entry should be expired
+    assert.strictEqual(cache.get('a'), undefined);
+  });
+
+  await test('cache TTL=0 means no expiration', async () => {
+    const cache = createLRUCache<number>(10, 0); // No TTL
+    cache.set('a', 1);
+    
+    await new Promise(resolve => setTimeout(resolve, 50));
+    
+    // Entry should still exist
+    assert.strictEqual(cache.get('a'), 1);
+  });
+
+  await test('cache.stats() includes TTL', () => {
+    const cache = createLRUCache<number>(10, 5000);
+    const stats = cache.stats();
+    assert.strictEqual(stats.ttl, 5000);
+    assert.strictEqual(stats.maxSize, 10);
   });
 
   // ---------- FUNCTION CACHE ----------
