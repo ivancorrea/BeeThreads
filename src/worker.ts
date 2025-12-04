@@ -50,25 +50,26 @@ let currentFnSource: string | null = null;
  * Creates a serialized error with optional debug info.
  */
 function createSerializedError(err: Error, source?: string | null): SerializedError {
+  // Monomorphic object shape - all properties declared upfront to avoid hidden class transitions
   const serialized: SerializedError = {
     name: err.name || 'Error',
     message: err.message || String(err),
-    stack: err.stack
+    stack: err.stack,
+    _sourceCode: (DEBUG_MODE && source) ? source : undefined,
+    cause: undefined,
+    errors: undefined
   };
   
   // Copy custom error properties (code, statusCode, etc.)
-  for (const key of Object.keys(err)) {
-    if (!['name', 'message', 'stack'].includes(key)) {
+  const errKeys = Object.keys(err);
+  for (let i = 0, len = errKeys.length; i < len; i++) {
+    const key = errKeys[i];
+    if (key !== 'name' && key !== 'message' && key !== 'stack') {
       const value = (err as unknown as Record<string, unknown>)[key];
-      if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) {
+      if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
         (serialized as unknown as Record<string, unknown>)[key] = value;
       }
     }
-  }
-  
-  // Include source code in debug mode for easier debugging
-  if (DEBUG_MODE && source) {
-    serialized._sourceCode = source;
   }
   
   return serialized;
@@ -122,24 +123,33 @@ const fnCache: FunctionCache = createFunctionCache(cacheSize, cacheTTL);
 /**
  * Redirects console.log/warn/error to main thread.
  */
+// Helper to convert args to strings without .map() overhead
+function argsToStrings(args: unknown[]): string[] {
+  const result = new Array<string>(args.length);
+  for (let i = 0, len = args.length; i < len; i++) {
+    result[i] = String(args[i]);
+  }
+  return result;
+}
+
 console.log = (...args: unknown[]): void => {
-  port.postMessage({ type: MessageType.LOG, level: LogLevel.LOG, args: args.map(String) });
+  port.postMessage({ type: MessageType.LOG, level: LogLevel.LOG, args: argsToStrings(args) });
 };
 
 console.warn = (...args: unknown[]): void => {
-  port.postMessage({ type: MessageType.LOG, level: LogLevel.WARN, args: args.map(String) });
+  port.postMessage({ type: MessageType.LOG, level: LogLevel.WARN, args: argsToStrings(args) });
 };
 
 console.error = (...args: unknown[]): void => {
-  port.postMessage({ type: MessageType.LOG, level: LogLevel.ERROR, args: args.map(String) });
+  port.postMessage({ type: MessageType.LOG, level: LogLevel.ERROR, args: argsToStrings(args) });
 };
 
 console.info = (...args: unknown[]): void => {
-  port.postMessage({ type: MessageType.LOG, level: LogLevel.INFO, args: args.map(String) });
+  port.postMessage({ type: MessageType.LOG, level: LogLevel.INFO, args: argsToStrings(args) });
 };
 
 console.debug = (...args: unknown[]): void => {
-  port.postMessage({ type: MessageType.LOG, level: LogLevel.DEBUG, args: args.map(String) });
+  port.postMessage({ type: MessageType.LOG, level: LogLevel.DEBUG, args: argsToStrings(args) });
 };
 
 // ============================================================================
@@ -156,16 +166,22 @@ console.debug = (...args: unknown[]): void => {
  * false even for real Error objects from the vm context.
  */
 function serializeError(e: unknown): SerializedError {
-  let serialized: SerializedError;
+  // Monomorphic object shape - all properties declared upfront
+  const serialized: SerializedError = {
+    name: 'Error',
+    message: '',
+    stack: undefined,
+    _sourceCode: (DEBUG_MODE && currentFnSource) ? currentFnSource : undefined,
+    cause: undefined,
+    errors: undefined
+  };
   
   // Check for error-like objects (has name and message properties)
   if (e && typeof e === 'object' && 'name' in e && 'message' in e) {
     const err = e as Record<string, unknown>;
-    serialized = { 
-      name: String(err.name), 
-      message: String(err.message), 
-      stack: err.stack as string | undefined 
-    };
+    serialized.name = String(err.name);
+    serialized.message = String(err.message);
+    serialized.stack = err.stack as string | undefined;
     
     // Preserve Error.cause (ES2022) - serialize recursively
     if ('cause' in err && err.cause != null) {
@@ -174,15 +190,22 @@ function serializeError(e: unknown): SerializedError {
     
     // Preserve AggregateError.errors - serialize each error
     if ('errors' in err && Array.isArray(err.errors)) {
-      serialized.errors = err.errors.map(serializeError);
+      const errArray = err.errors;
+      const serializedErrors = new Array(errArray.length);
+      for (let j = 0, jlen = errArray.length; j < jlen; j++) {
+        serializedErrors[j] = serializeError(errArray[j]);
+      }
+      serialized.errors = serializedErrors;
     }
     
     // Copy custom properties (like code, statusCode, etc.)
-    for (const key of Object.keys(err)) {
-      if (!['name', 'message', 'stack', 'cause', 'errors'].includes(key)) {
+    const errObjKeys = Object.keys(err);
+    for (let i = 0, len = errObjKeys.length; i < len; i++) {
+      const key = errObjKeys[i];
+      if (key !== 'name' && key !== 'message' && key !== 'stack' && key !== 'cause' && key !== 'errors') {
         const value = err[key];
         // Only copy serializable primitives
-        if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) {
+        if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
           (serialized as unknown as Record<string, unknown>)[key] = value;
         }
       }
@@ -190,7 +213,9 @@ function serializeError(e: unknown): SerializedError {
   }
   // For non-error objects, try to get useful information
   else if (e instanceof Error) {
-    serialized = { name: e.name, message: e.message, stack: e.stack };
+    serialized.name = e.name;
+    serialized.message = e.message;
+    serialized.stack = e.stack;
     
     // Preserve cause
     if (e.cause != null) {
@@ -199,26 +224,28 @@ function serializeError(e: unknown): SerializedError {
     
     // Preserve AggregateError.errors
     if (e instanceof AggregateError) {
-      serialized.errors = e.errors.map(serializeError);
+      const errArray = e.errors;
+      const serializedErrors = new Array(errArray.length);
+      for (let j = 0, jlen = errArray.length; j < jlen; j++) {
+        serializedErrors[j] = serializeError(errArray[j]);
+      }
+      serialized.errors = serializedErrors;
     }
     
     // Copy custom properties from Error instance
-    for (const key of Object.keys(e)) {
-      if (!['name', 'message', 'stack', 'cause', 'errors'].includes(key)) {
+    const errorKeys = Object.keys(e);
+    for (let i = 0, len = errorKeys.length; i < len; i++) {
+      const key = errorKeys[i];
+      if (key !== 'name' && key !== 'message' && key !== 'stack' && key !== 'cause' && key !== 'errors') {
         const value = (e as unknown as Record<string, unknown>)[key];
-        if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) {
+        if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
           (serialized as unknown as Record<string, unknown>)[key] = value;
         }
       }
     }
   }
   else {
-    serialized = { name: 'Error', message: String(e) };
-  }
-  
-  // Include source code in debug mode (use _sourceCode to avoid conflict with error.code)
-  if (DEBUG_MODE && currentFnSource) {
-    serialized._sourceCode = currentFnSource;
+    serialized.message = String(e);
   }
   
   return serialized;
@@ -262,7 +289,15 @@ function validateFunctionSource(src: unknown): asserts src is string {
 
   const trimmed = src.trim();
 
-  if (!VALID_FUNCTION_PATTERNS.some(p => p.test(trimmed))) {
+  // Manual loop with early return (faster than .some())
+  let isValid = false;
+  for (let i = 0, len = VALID_FUNCTION_PATTERNS.length; i < len; i++) {
+    if (VALID_FUNCTION_PATTERNS[i].test(trimmed)) {
+      isValid = true;
+      break;
+    }
+  }
+  if (!isValid) {
     throw new TypeError('Invalid function source');
   }
 
@@ -295,9 +330,9 @@ function applyCurried(fn: Function, args: unknown[]): unknown {
   if (typeof result === 'function' && args.length > 1) {
     // Try curried application
     result = fn;
-    for (const arg of args) {
+    for (let i = 0, len = args.length; i < len; i++) {
       if (typeof result !== 'function') break;
-      result = (result as Function)(arg);
+      result = (result as Function)(args[i]);
     }
   }
 

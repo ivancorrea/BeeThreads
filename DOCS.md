@@ -1,19 +1,68 @@
-# bee-threads - Internal Documentation
+# bee-threads - Technical Documentation
 
-> Deep dive into architecture, decisions, and performance optimizations.
+> Complete guide to architecture, internal decisions, and performance optimizations.
 
-**Version:** 3.1.3 (TypeScript)
+**Version:** 3.1.6 (TypeScript)
 
 ---
 
 ## Table of Contents
 
-1. [Architecture Overview](#architecture-overview)
-2. [File-by-File Breakdown](#file-by-file-breakdown)
-3. [Core Decisions & Rationale](#core-decisions--rationale)
-4. [Performance Architecture](#performance-architecture)
-5. [Data Flow](#data-flow)
-6. [Contributing Guide](#contributing-guide)
+1. [What is bee-threads?](#what-is-bee-threads)
+2. [Architecture Overview](#architecture-overview)
+3. [File-by-File Breakdown](#file-by-file-breakdown)
+4. [Technical Decisions](#technical-decisions)
+5. [Performance Architecture](#performance-architecture)
+6. [Data Flow](#data-flow)
+7. [Error Handling](#error-handling)
+8. [Memory Management](#memory-management)
+9. [Contributing Guide](#contributing-guide)
+
+---
+
+## What is bee-threads?
+
+**bee-threads** is a zero-dependency library that makes Node.js worker threads as simple as Promises.
+
+### The Problem
+
+Native `worker_threads` require:
+- Creating separate worker files
+- Managing message passing manually
+- Handling worker lifecycle (creation, errors, termination)
+- Implementing your own pooling logic
+
+```js
+// Native worker_threads: ~50+ lines of boilerplate
+const { Worker } = require('worker_threads');
+const worker = new Worker('./worker.js');
+worker.postMessage({ data: 21 });
+worker.on('message', (result) => console.log(result));
+worker.on('error', handleError);
+worker.on('exit', handleExit);
+// ... error handling, lifecycle management, pooling...
+```
+
+### The Solution
+
+```js
+// bee-threads: 1 line
+const result = await bee((x) => x * 2)(21); // 42
+```
+
+### Key Features
+
+| Feature | Description |
+|---------|-------------|
+| **Zero dependencies** | Only uses Node.js built-in modules |
+| **Inline functions** | No separate worker files needed |
+| **Worker pool** | Automatic worker reuse with load balancing |
+| **Function caching** | LRU cache with vm.Script compilation |
+| **Worker affinity** | Routes same function to same worker for V8 JIT benefits |
+| **TypeScript** | Full type definitions included |
+| **Generators** | Stream results with generator functions |
+| **Cancellation** | AbortSignal support for task cancellation |
+| **Retry** | Automatic retry with exponential backoff |
 
 ---
 
@@ -66,17 +115,19 @@
 
 ## File-by-File Breakdown
 
-### `src/index.ts` - Public API
-
-**Purpose:** Single entry point. Hides internal complexity.
+### `src/index.ts` - Public API Entry Point
 
 **Why it exists:**
+Single entry point that hides internal complexity. Users only need `require('bee-threads')`.
 
--  Users only need `require('bee-threads')` - no deep imports
--  Centralizes all public exports
--  Acts as facade pattern for internal modules
+**What it does:**
+- Exports `bee()` - the simple curried API
+- Exports `beeThreads` - the full fluent API
+- Re-exports error classes for catch handling
+- Implements the `bee()` function with thenable support
 
 **Key exports:**
+
 | Export | Description |
 |--------|-------------|
 | `bee(fn)` | Simple curried API for quick tasks |
@@ -87,116 +138,132 @@
 | `WorkerError` | Wraps errors from worker (preserves custom properties) |
 | `noopLogger` | Silent logger for disabling logs |
 
+**Example:**
+
+```js
+const { bee, beeThreads, TimeoutError } = require('bee-threads');
+
+// Simple API
+const result = await bee((x) => x * 2)(21);
+
+// Full API
+const result = await beeThreads
+  .run((x) => x * 2)
+  .usingParams(21)
+  .execute();
+```
+
 ---
 
 ### `src/types.ts` - TypeScript Type Definitions
 
-**Purpose:** Centralized type definitions for the entire library.
+**Why it exists:**
+Centralizes all type definitions for the entire library. Enables full IntelliSense support and compile-time type checking.
+
+**What it does:**
+- Defines all interfaces (`PoolConfig`, `WorkerEntry`, `ExecutionOptions`, etc.)
+- Defines message types for worker communication
+- Exports the `noopLogger` for disabling logs
 
 **Key types:**
 
 ```typescript
-// Message types (const enum for performance)
-const enum MessageType {
-	SUCCESS = 0,
-	ERROR = 1,
-	LOG = 2,
-	YIELD = 3,
-	RETURN = 4,
-	END = 5,
-}
+// Message types for worker communication
+const MessageType = {
+  SUCCESS: 'success',
+  ERROR: 'error',
+  LOG: 'log',
+  YIELD: 'yield',
+  RETURN: 'return',
+  END: 'end',
+} as const;
 
-// Pluggable logger interface
+// Logger interface (compatible with Pino, Winston, console)
 interface Logger {
-	log: (...args: unknown[]) => void
-	error: (...args: unknown[]) => void
-	warn: (...args: unknown[]) => void
-	// ...
-}
-
-// Pool configuration
-interface PoolConfig {
-	poolSize: number
-	minThreads: number
-	debugMode: boolean
-	logger: Logger | null
-	// ...
+  log(...args: unknown[]): void;
+  warn(...args: unknown[]): void;
+  error(...args: unknown[]): void;
+  info(...args: unknown[]): void;
+  debug(...args: unknown[]): void;
 }
 ```
 
+**Technical Decision:** Uses `as const` object instead of TypeScript `enum` for better tree-shaking and runtime performance.
+
 ---
 
-### `src/config.ts` - Centralized State
-
-**Purpose:** Single source of truth for ALL mutable state.
+### `src/config.ts` - Centralized State Management
 
 **Why it exists:**
+Single source of truth for ALL mutable state. Makes debugging easier and testing predictable.
 
--  Debugging: One place to inspect entire library state
--  Testing: Easy to reset state between tests
--  Predictability: No scattered global variables
+**What it does:**
+- Stores pool configuration (`poolSize`, `minThreads`, `timeout`, etc.)
+- Manages worker pools (`pools.normal`, `pools.generator`)
+- Maintains O(1) counters for busy/idle workers
+- Tracks execution metrics
 
 **State managed:**
 
 ```typescript
-config // User settings (poolSize, timeout, retry, etc)
-pools // Active workers { normal: Worker[], generator: Worker[] }
+config       // User settings (poolSize, timeout, retry, etc.)
+pools        // Active workers { normal: Worker[], generator: Worker[] }
 poolCounters // O(1) counters { busy: N, idle: N }
-queues // Pending tasks by priority { high: [], normal: [], low: [] }
-metrics // Execution statistics
+queues       // Pending tasks by priority { high: [], normal: [], low: [] }
+metrics      // Execution statistics
 ```
 
-**Why poolCounters exist:**
-Instead of `pools.normal.filter(w => !w.busy).length` (O(n)), we maintain counters that update on every state change. This makes `getWorker()` checks O(1).
+**Technical Decision:** `poolCounters` exist for O(1) state checks. Instead of `pools.filter(w => !w.busy).length` (O(n)), we maintain counters that update on every state change.
 
 ---
 
 ### `src/pool.ts` - Worker Pool Management
 
-**Purpose:** Worker lifecycle management and intelligent task routing.
+**Why it exists:**
+Manages the lifecycle of worker threads with intelligent task routing.
 
-**Key responsibilities:**
+**What it does:**
+- Creates workers with proper configuration
+- Selects best worker for each task (load balancing + affinity)
+- Returns workers to pool after use
+- Cleans up idle workers to free resources
+- Manages temporary overflow workers
 
-1. Create workers with proper configuration
-2. Select best worker for each task (load balancing + affinity)
-3. Return workers to pool after use
-4. Clean up idle workers
-5. Handle overflow with temporary workers
-6. Prevent memory leaks (setMaxListeners)
+**Selection Strategy (priority order):**
 
-**Selection Strategy (in priority order):**
+| Priority | Strategy | Why |
+|----------|----------|-----|
+| 1 | **Affinity match** | Worker already has function cached & V8-optimized |
+| 2 | **Least-used idle** | Distributes load evenly across pool |
+| 3 | **Create new pooled** | Pool not at capacity |
+| 4 | **Create temporary** | Overflow handling, terminated after use |
+| 5 | **Queue task** | No resources available |
 
-| Priority | Strategy              | Why                                                 |
-| -------- | --------------------- | --------------------------------------------------- |
-| 1        | **Affinity match**    | Worker already has function compiled & V8-optimized |
-| 2        | **Least-used idle**   | Distributes load evenly across pool                 |
-| 3        | **Create new pooled** | Pool not at capacity                                |
-| 4        | **Create temporary**  | Overflow handling, terminated after use             |
-| 5        | **Queue task**        | No resources available                              |
+**Example:**
 
-**Counter Management (v3.1.3 fix):**
-
-```typescript
-// New workers only increment busy (not decrement idle)
-if (pool.length < config.poolSize) {
-	counters.busy++ // Only this, no idle--
-}
-
-// Release only updates if worker was actually busy
-if (entry.busy) {
-	entry.busy = false
-	counters.busy--
-	counters.idle++
-}
+```js
+// Affinity in action
+await bee((x) => heavyComputation(x))(1); // Worker A
+await bee((x) => heavyComputation(x))(2); // Worker A again (affinity hit)
+await bee((y) => differentFn(y))(3);      // Worker B (affinity miss)
 ```
 
 ---
 
-### `src/execution.ts` - Task Engine
+### `src/execution.ts` - Core Task Engine
 
-**Purpose:** Core execution logic - worker communication and lifecycle.
+**Why it exists:**
+Heart of task execution. Orchestrates worker communication and handles edge cases.
 
-**Race Condition Prevention (v3.1.2+ fix):**
+**What it does:**
+- Acquires worker from pool (with affinity preference)
+- Sends task to worker via `postMessage`
+- Handles responses, errors, and timeouts
+- Releases worker back to pool
+- Tracks metrics for monitoring
+- Implements retry with exponential backoff
+
+**Race Condition Prevention:**
 
 ```typescript
 // Timeout handler - set settled BEFORE terminate
@@ -214,100 +281,314 @@ timer = setTimeout(() => {
 }, timeout);
 ```
 
-**Custom Error Properties (v3.1.3):**
-
-```typescript
-// Worker errors preserve custom properties
-const errorData = errMsg.error as Record<string, unknown>
-for (const key of Object.keys(errorData)) {
-	if (!['name', 'message', 'stack', '_sourceCode'].includes(key)) {
-		;(err as Record<string, unknown>)[key] = errorData[key]
-	}
-}
-```
+**Technical Decision:** Setting `settled = true` BEFORE calling `terminate()` prevents race conditions where the async `exit` event could beat the timeout handler.
 
 ---
 
 ### `src/executor.ts` - Fluent API Builder
 
-**Purpose:** Creates the chainable API users interact with.
+**Why it exists:**
+Implements the immutable builder pattern for task execution.
 
-**Input Validation (v3.1.2+):**
+**What it does:**
+- Creates chainable API (`.usingParams()`, `.setContext()`, `.retry()`, etc.)
+- Each method returns a NEW executor instance (immutable)
+- Validates inputs before execution
+
+**Example:**
+
+```js
+// Immutable - base can be reused
+const base = beeThreads.run(fn).setContext({ API_KEY: 'xxx' });
+
+await base.usingParams(1).execute(); // Uses context
+await base.usingParams(2).execute(); // Same context, different params
+```
+
+**Validation:**
 
 ```typescript
-// Priority validation
-priority(level: Priority): Executor<T> {
-  const validPriorities = ['high', 'normal', 'low'];
-  if (!validPriorities.includes(level)) {
-    throw new TypeError(`Invalid priority "${level}". Use: ${validPriorities.join(', ')}`);
-  }
-  // ...
-}
-
-// Context validation (no functions/Symbols)
+// Context validation - no functions or Symbols
 setContext(context: Record<string, unknown>): Executor<T> {
   for (const [key, value] of Object.entries(context)) {
     if (typeof value === 'function') {
-      throw new TypeError(`setContext() key "${key}" contains a function which cannot be serialized.`);
+      throw new TypeError(`setContext() key "${key}" contains a function...`);
     }
   }
-  // ...
 }
+```
+
+---
+
+### `src/stream-executor.ts` - Generator Streaming
+
+**Why it exists:**
+Enables streaming results from generator functions.
+
+**What it does:**
+- Creates `ReadableStream` from generator functions
+- Streams yielded values as they're produced
+- Captures return value for access after completion
+- Handles cleanup on cancel
+
+**Example:**
+
+```js
+const stream = beeThreads
+  .stream(function* (n) {
+    for (let i = 1; i <= n; i++) {
+      yield i * i;
+    }
+    return 'done';
+  })
+  .usingParams(5)
+  .execute();
+
+for await (const value of stream) {
+  console.log(value); // 1, 4, 9, 16, 25
+}
+
+console.log(stream.returnValue); // 'done'
 ```
 
 ---
 
 ### `src/cache.ts` - LRU Function Cache
 
-**Purpose:** Avoid repeated function compilation.
+**Why it exists:**
+Avoids repeated function compilation for massive performance gains.
 
-**Why this matters (performance numbers):**
+**What it does:**
+- Compiles functions using `vm.Script` (not `eval()`)
+- Caches compiled functions in LRU cache
+- Creates optimized sandbox for context injection
+- Reuses shared base context when no custom context needed
 
-| Operation         | Time         |
-| ----------------- | ------------ |
-| vm.Script compile | ~0.3-0.5ms   |
-| Cache lookup      | ~0.001ms     |
-| **Speedup**       | **300-500x** |
+**Performance comparison:**
+
+| Operation | Time |
+|-----------|------|
+| vm.Script compile | ~0.3-0.5ms |
+| Cache lookup | ~0.001ms |
+| **Speedup** | **300-500x** |
+
+**Why vm.Script instead of eval():**
+
+| Aspect | eval() | vm.Script |
+|--------|--------|-----------|
+| Context injection | String manipulation | Native runInContext() |
+| V8 code caching | Lost on string change | produceCachedData: true |
+| Performance (cached) | ~1.2-3µs | ~0.08-0.3µs |
+| Performance (w/ context) | ~4.8ms | ~0.1ms (43x faster) |
+| Stack traces | Shows "eval" | Proper filename |
+
+**Technical Decision:** When no context is needed (~90% of cases), we reuse a shared base context instead of creating a new V8 context (~1-2MB each).
 
 ---
 
 ### `src/worker.ts` - Worker Thread Script
 
-**Purpose:** Code that runs inside worker threads.
+**Why it exists:**
+The code that runs inside each worker thread for regular functions.
 
-**Error Serialization (v3.1.3):**
+**What it does:**
+- Receives function source + arguments + context from main thread
+- Validates function source (with caching)
+- Compiles using vm.Script with LRU caching
+- Executes function (handles async and curried)
+- Sends result back to main thread
+- Forwards console.log/warn/error to main thread
+
+**Error Serialization:**
 
 ```typescript
 function serializeError(e: unknown): SerializedError {
-	// Copy custom properties (code, statusCode, etc.)
-	for (const key of Object.keys(err)) {
-		if (!['name', 'message', 'stack'].includes(key)) {
-			const value = err[key]
-			if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) {
-				serialized[key] = value
-			}
-		}
-	}
+  const serialized = {
+    name: err.name,
+    message: err.message,
+    stack: err.stack,
+    // Preserve Error.cause (ES2022)
+    cause: err.cause ? serializeError(err.cause) : undefined,
+    // Preserve AggregateError.errors
+    errors: err.errors?.map(serializeError),
+  };
+  
+  // Copy custom properties (code, statusCode, etc.)
+  for (const key of Object.keys(err)) {
+    if (!['name', 'message', 'stack'].includes(key)) {
+      serialized[key] = err[key];
+    }
+  }
+  
+  return serialized;
+}
+```
 
-	// Debug mode uses _sourceCode (not code) to avoid conflicts
-	if (DEBUG_MODE && currentFnSource) {
-		serialized._sourceCode = currentFnSource
-	}
+**Technical Decision:** We check `e.name` instead of `instanceof Error` because errors from `vm.createContext()` have a different Error class.
+
+---
+
+### `src/generator-worker.ts` - Generator Worker Script
+
+**Why it exists:**
+The code that runs inside worker threads for generator functions.
+
+**What it does:**
+- Same as `worker.ts` but handles generators
+- Streams yielded values back to main thread
+- Captures return value for final message
+- Handles async generators (yields that return Promises)
+
+**Message flow:**
+
+```
+Main Thread                    Worker Thread
+     |                              |
+     |-------- { fn, args } ------->|
+     |                              | (execute generator)
+     |<------ { type: YIELD } ------|
+     |<------ { type: YIELD } ------|
+     |<------ { type: RETURN } -----|
+     |<------ { type: END } --------|
+```
+
+---
+
+### `src/errors.ts` - Custom Error Classes
+
+**Why it exists:**
+Typed errors for specific failure modes with error codes.
+
+**Error classes:**
+
+| Error | Code | When |
+|-------|------|------|
+| `AbortError` | `ERR_ABORTED` | Task cancelled via AbortSignal |
+| `TimeoutError` | `ERR_TIMEOUT` | Exceeded time limit |
+| `QueueFullError` | `ERR_QUEUE_FULL` | Queue at maxQueueSize |
+| `WorkerError` | `ERR_WORKER` | Error thrown inside worker |
+
+**Example:**
+
+```js
+try {
+  await beeThreads.withTimeout(1000)(() => slowTask()).execute();
+} catch (err) {
+  if (err instanceof TimeoutError) {
+    console.log(`Timed out after ${err.timeout}ms`);
+  }
+  if (err instanceof WorkerError) {
+    console.log(err.code);       // Custom error code preserved
+    console.log(err.statusCode); // Custom properties preserved
+  }
 }
 ```
 
 ---
 
-### `src/errors.ts` - Typed Errors
+### `src/validation.ts` - Input Validation
 
-**Purpose:** Custom error classes for specific failure modes.
+**Why it exists:**
+Fail-fast validation functions that throw immediately on invalid input.
 
-| Error            | Code             | When                                                |
-| ---------------- | ---------------- | --------------------------------------------------- |
-| `AbortError`     | `ERR_ABORTED`    | Task cancelled via AbortSignal                      |
-| `TimeoutError`   | `ERR_TIMEOUT`    | Exceeded time limit                                 |
-| `QueueFullError` | `ERR_QUEUE_FULL` | Queue at maxQueueSize                               |
-| `WorkerError`    | `ERR_WORKER`     | Error thrown inside worker (preserves custom props) |
+**Functions:**
+
+```typescript
+validateFunction(fn)   // Ensures fn is a callable function
+validateTimeout(ms)    // Ensures ms is positive finite number
+validatePoolSize(size) // Ensures size is positive integer
+validateClosure(obj)   // Ensures obj is non-null object
+```
+
+---
+
+### `src/utils.ts` - Utility Functions
+
+**Why it exists:**
+Shared utility functions used across the codebase.
+
+**Functions:**
+
+```typescript
+// Recursively freeze an object
+deepFreeze({ a: { b: 1 } });
+
+// Promise-based sleep
+await sleep(1000);
+
+// Exponential backoff with jitter
+calculateBackoff(attempt, baseDelay, maxDelay, factor);
+```
+
+---
+
+## Technical Decisions
+
+### 1. Why vm.Script instead of eval()?
+
+**Decision:** Use `vm.Script` with `vm.createContext()` instead of `eval()`.
+
+**Rationale:**
+- **43x faster** for context injection scenarios
+- Native `runInContext()` vs string manipulation
+- V8 code caching with `produceCachedData: true`
+- Proper stack traces (shows filename instead of "eval")
+
+### 2. Why LRU cache for functions?
+
+**Decision:** Cache compiled functions using LRU (Least Recently Used) strategy.
+
+**Rationale:**
+- Compilation is expensive (~0.3-0.5ms)
+- Cache lookup is cheap (~0.001ms)
+- LRU ensures frequently-used functions stay cached
+- Bounded size prevents memory bloat
+
+### 3. Why worker affinity?
+
+**Decision:** Route same function to same worker when possible.
+
+**Rationale:**
+- V8's TurboFan JIT compiles hot functions to machine code
+- Affinity keeps functions "hot" in the same worker
+- Combined with LRU cache = near-native performance
+- Hash-based routing is O(1)
+
+### 4. Why O(1) counters instead of array iteration?
+
+**Decision:** Maintain separate `busy` and `idle` counters.
+
+**Rationale:**
+- `pools.filter(w => !w.busy).length` is O(n)
+- Counter updates on state change are O(1)
+- Critical for high-throughput scenarios
+
+### 5. Why shared base context?
+
+**Decision:** Reuse a single `vm.Context` when no custom context is needed.
+
+**Rationale:**
+- Creating a new context is expensive (~1-2MB each)
+- ~90% of calls don't need custom context
+- Massive memory savings in high-volume scenarios
+
+### 6. Why settled flag before terminate()?
+
+**Decision:** Set `settled = true` BEFORE calling `worker.terminate()`.
+
+**Rationale:**
+- `terminate()` fires `exit` event asynchronously
+- Without the flag, `onExit` could race with timeout handler
+- This caused ~50% wrong error type in v3.1.1
+
+### 7. Why monomorphic object shapes?
+
+**Decision:** Declare all properties upfront in objects like `SerializedError`.
+
+**Rationale:**
+- V8 optimizes objects with consistent shapes (hidden classes)
+- Adding properties dynamically causes deoptimization
+- Pre-declaring `undefined` properties maintains shape
 
 ---
 
@@ -317,7 +598,7 @@ function serializeError(e: unknown): SerializedError {
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│ Layer 1: vm.Script Compilation                                  │
+│ Layer 1: vm.Script Compilation                                 │
 │ • Compile once, run many times                                 │
 │ • produceCachedData enables V8 code caching                    │
 │ • 5-15x faster than eval() for context injection               │
@@ -325,7 +606,7 @@ function serializeError(e: unknown): SerializedError {
                               │
                               ▼
 ┌────────────────────────────────────────────────────────────────┐
-│ Layer 2: LRU Function Cache                                     │
+│ Layer 2: LRU Function Cache                                    │
 │ • Avoid recompilation of repeated functions                    │
 │ • Cache key includes context hash                              │
 │ • Bounded size prevents memory bloat                           │
@@ -333,40 +614,127 @@ function serializeError(e: unknown): SerializedError {
                               │
                               ▼
 ┌────────────────────────────────────────────────────────────────┐
-│ Layer 3: Worker Affinity                                        │
+│ Layer 3: Worker Affinity                                       │
 │ • Route same function to same worker                           │
-│ • Leverages V8 TurboFan optimization                          │
+│ • Leverages V8 TurboFan optimization                           │
 │ • Function hash → Worker mapping                               │
 └────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌────────────────────────────────────────────────────────────────┐
-│ Layer 4: V8 TurboFan JIT                                        │
+│ Layer 4: V8 TurboFan JIT                                       │
 │ • Hot functions get compiled to machine code                   │
 │ • Affinity ensures functions stay "hot" in same worker         │
 │ • Combined effect: near-native performance                     │
 └────────────────────────────────────────────────────────────────┘
 ```
 
+### Micro-Optimizations Applied (v3.1.3)
+
+| Category | Count | Examples |
+|----------|-------|----------|
+| **Loop replacements** | 24 | `for...of` → classic `for` with cached length |
+| **Array method replacements** | 12 | `.map()`, `.filter()`, `.some()` → manual loops |
+| **Spread → concat** | 6 | `[...a, ...b]` → `a.concat(b)` |
+| **Monomorphic objects** | 6 | Pre-declare all properties |
+| **O(1) lookups** | 4 | `.includes()` → direct comparison |
+| **Big O reductions** | 2 | O(2n) → O(n) |
+
 ---
 
-## Bug Fixes in v3.1.x
+## Data Flow
 
-### v3.1.2 - Race Condition Fix
+### Regular Function Execution
 
--  **Problem:** `worker.terminate()` fires `exit` event async, causing ~50% wrong error type
--  **Solution:** Set `settled = true` BEFORE calling `terminate()`
+```
+1. User calls bee(fn)(args)
+2. index.ts: Convert fn to string, create thenable
+3. execution.ts: Request worker from pool
+4. pool.ts: Select best worker (affinity → idle → new → temp → queue)
+5. execution.ts: Send { fn, args, context } to worker
+6. worker.ts: Validate, compile (cached), execute
+7. worker.ts: Send { type: SUCCESS, value } or { type: ERROR, error }
+8. execution.ts: Resolve/reject promise, release worker
+9. pool.ts: Return worker to pool or process queued task
+```
 
-### v3.1.3 - Counter & Error Fixes
+### Generator Streaming
 
--  **Problem 1:** Busy counter going negative after timeouts
--  **Solution:** Only decrement if entry was actually busy; remove terminated workers from pool
+```
+1. User calls beeThreads.stream(gen).execute()
+2. stream-executor.ts: Create ReadableStream, request worker
+3. generator-worker.ts: Execute generator
+4. For each yield: Send { type: YIELD, value }
+5. On return: Send { type: RETURN, value }, { type: END }
+6. stream-executor.ts: Enqueue values to ReadableStream
+7. User consumes with for-await-of
+```
 
--  **Problem 2:** Custom error properties lost (e.g., `error.code`)
--  **Solution:** Copy all serializable properties in `serializeError()`
+---
 
--  **Problem 3:** Memory leak warning with many aborts
--  **Solution:** `worker.setMaxListeners(0)` on worker creation
+## Error Handling
+
+### Error Preservation
+
+Custom error properties are preserved across worker boundaries:
+
+```js
+// In worker
+const err = new Error('Failed');
+err.code = 'ERR_CUSTOM';
+err.statusCode = 500;
+throw err;
+
+// In main thread
+catch (err) {
+  console.log(err.code);       // 'ERR_CUSTOM'
+  console.log(err.statusCode); // 500
+}
+```
+
+### Error Chain Preservation (ES2022)
+
+```js
+// Error.cause is preserved
+throw new Error('High level', { cause: lowLevelError });
+
+// AggregateError.errors are preserved
+throw new AggregateError([err1, err2], 'Multiple failures');
+```
+
+---
+
+## Memory Management
+
+### Low Memory Mode
+
+For memory-constrained environments (IoT, serverless):
+
+```js
+beeThreads.configure({ lowMemoryMode: true });
+```
+
+Effects:
+- Function cache size reduced to 10 (default: 100) → ~35-50% less memory
+- Validation cache disabled → ~10-20% less memory
+- Worker affinity tracking disabled → ~15-25% less memory
+- **Total reduction: ~60-80% less memory**
+
+Trade-off: Slower repeated executions (no caching benefits).
+
+### Resource Limits
+
+Control V8 heap size per worker:
+
+```js
+beeThreads.configure({
+  resourceLimits: {
+    maxOldGenerationSizeMb: 256,  // Default: 512
+    maxYoungGenerationSizeMb: 64, // Default: 128
+    codeRangeSizeMb: 32           // Default: 64
+  }
+});
+```
 
 ---
 
@@ -375,20 +743,28 @@ function serializeError(e: unknown): SerializedError {
 ### Running Tests
 
 ```bash
-npm test  # Builds and runs 198 tests
+npm test  # Builds and runs 203 tests
 ```
 
 ### Code Style
 
--  TypeScript strict mode
--  JSDoc on all public functions
--  "Why this exists" comments on modules
--  Descriptive names (no abbreviations)
--  Small, focused functions (< 50 lines preferred)
--  Centralized state in config.ts
+- TypeScript strict mode
+- JSDoc on all public functions
+- "Why this exists" comments on modules
+- Descriptive names (no abbreviations)
+- Small, focused functions (< 50 lines preferred)
+- Centralized state in config.ts
+
+### Performance Guidelines
+
+1. Use classic `for` loops with cached length
+2. Avoid `Array.prototype.includes()` for small sets
+3. Prefer `concat()` over spread for array merging
+4. Pre-declare all object properties (monomorphic shapes)
+5. Use direct comparisons instead of `includes()` for 2-3 items
 
 ---
 
 ## License
 
-MIT
+MIT © [Samuel Santos](https://github.com/samsantosb)

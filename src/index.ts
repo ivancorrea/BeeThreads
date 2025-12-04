@@ -1,8 +1,31 @@
 /**
- * @fileoverview bee-threads - Handle threading as promises.
+ * @fileoverview bee-threads - Worker threads with zero boilerplate.
  *
- * This is the main entry point for the bee-threads library.
- * It exposes the public API and re-exports error classes.
+ * ## Why This File Exists
+ *
+ * This is the main entry point for the bee-threads library. It acts as a
+ * facade that hides internal complexity from users. Users only need to
+ * `require('bee-threads')` - no deep imports required.
+ *
+ * ## What It Does
+ *
+ * - Exports `bee()` - the simple curried API for quick tasks
+ * - Exports `beeThreads` - the full fluent API with all features
+ * - Re-exports error classes for programmatic error handling
+ * - Implements thenable support so `await bee(fn)(args)` works
+ *
+ * ## Usage Examples
+ *
+ * ```js
+ * // Simple API
+ * const result = await bee((x) => x * 2)(21); // 42
+ *
+ * // Full API
+ * const result = await beeThreads
+ *   .run((x) => x * 2)
+ *   .usingParams(21)
+ *   .execute();
+ * ```
  *
  * @module bee-threads
  * @license MIT
@@ -85,13 +108,33 @@ export function bee<T = unknown>(fn: Function): CurriedFunction<T> {
 
   function createCurry(accumulatedArgs: unknown[]): CurriedFunction<T> {
     const curry = function (...callArgs: unknown[]): CurriedFunction<T> | Promise<T> {
-      // Check if any argument has beeClosures
-      const closuresArg = callArgs.find(hasBeeClosures);
+      // Single pass O(n) - find beeClosures and collect params simultaneously
+      let closuresArg: BeeClosuresArg | null = null;
+      let paramsFromThisCall: unknown[] | null = null;
+      
+      for (let i = 0, len = callArgs.length; i < len; i++) {
+        const arg = callArgs[i];
+        if (hasBeeClosures(arg)) {
+          closuresArg = arg;
+          // Only allocate params array if we found closures
+          if (!paramsFromThisCall) {
+            paramsFromThisCall = [];
+            // Backfill previous args
+            for (let j = 0; j < i; j++) {
+              paramsFromThisCall.push(callArgs[j]);
+            }
+          }
+        } else if (paramsFromThisCall) {
+          paramsFromThisCall.push(arg);
+        }
+      }
 
       if (closuresArg) {
         // Found beeClosures - execute with context
-        const paramsFromThisCall = callArgs.filter(a => !hasBeeClosures(a));
-        const allArgs = [...accumulatedArgs, ...paramsFromThisCall];
+        const params = paramsFromThisCall || callArgs;
+        const allArgs = accumulatedArgs.length > 0 
+          ? accumulatedArgs.concat(params)
+          : params;
         return execute<T>(fnString, allArgs, { context: closuresArg.beeClosures }) as Promise<T>;
       }
 
@@ -101,7 +144,11 @@ export function bee<T = unknown>(fn: Function): CurriedFunction<T> {
       }
 
       // Accumulate args and return new curry (thenable for await)
-      const nextCurry = createCurry([...accumulatedArgs, ...callArgs]);
+      const nextCurry = createCurry(
+        accumulatedArgs.length > 0 
+          ? accumulatedArgs.concat(callArgs)
+          : callArgs
+      );
 
       return nextCurry;
     } as CurriedFunction<T>;
@@ -240,33 +287,37 @@ export const beeThreads = {
    * Gracefully shuts down all worker pools.
    */
   async shutdown(): Promise<void> {
-    // Reject all queued tasks
-    for (const poolType of Object.keys(queues) as PoolType[]) {
-      const queue = queues[poolType];
-      for (const priority of ['high', 'normal', 'low'] as const) {
-        while (queue[priority].length > 0) {
-          const task = queue[priority].shift();
-          if (task) {
-            task.reject(new AsyncThreadError('Pool shutting down', 'ERR_SHUTDOWN'));
-          }
-        }
-      }
-    }
+    // Reject all queued tasks - using direct access (faster than array iteration)
+    const normalQueue = queues.normal;
+    const generatorQueue = queues.generator;
+    
+    // Drain all priority queues
+    let task;
+    while ((task = normalQueue.high.shift())) task.reject(new AsyncThreadError('Pool shutting down', 'ERR_SHUTDOWN'));
+    while ((task = normalQueue.normal.shift())) task.reject(new AsyncThreadError('Pool shutting down', 'ERR_SHUTDOWN'));
+    while ((task = normalQueue.low.shift())) task.reject(new AsyncThreadError('Pool shutting down', 'ERR_SHUTDOWN'));
+    while ((task = generatorQueue.high.shift())) task.reject(new AsyncThreadError('Pool shutting down', 'ERR_SHUTDOWN'));
+    while ((task = generatorQueue.normal.shift())) task.reject(new AsyncThreadError('Pool shutting down', 'ERR_SHUTDOWN'));
+    while ((task = generatorQueue.low.shift())) task.reject(new AsyncThreadError('Pool shutting down', 'ERR_SHUTDOWN'));
 
-    // Collect and clear pools
-    const allWorkers = [...pools.normal, ...pools.generator];
+    // Collect and clear pools - concat is faster than spread for 2 arrays
+    const allWorkers = pools.normal.concat(pools.generator);
     pools.normal = [];
     pools.generator = [];
     poolCounters.normal = { busy: 0, idle: 0 };
     poolCounters.generator = { busy: 0, idle: 0 };
 
     // Terminate all workers
-    await Promise.all(allWorkers.map(entry => {
+    const len = allWorkers.length;
+    const promises = new Array(len);
+    for (let i = 0; i < len; i++) {
+      const entry = allWorkers[i];
       if (entry.terminationTimer) {
         clearTimeout(entry.terminationTimer);
       }
-      return entry.worker.terminate();
-    }));
+      promises[i] = entry.worker.terminate();
+    }
+    await Promise.all(promises);
 
     metrics.activeTemporaryWorkers = 0;
   },

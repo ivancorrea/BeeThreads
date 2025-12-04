@@ -1,5 +1,26 @@
 /**
  * @fileoverview Input validation functions for bee-threads.
+ *
+ * ## Why This File Exists
+ *
+ * Centralizes all input validation logic. This follows the "fail-fast"
+ * pattern - invalid inputs throw immediately with clear error messages,
+ * rather than causing cryptic errors later in execution.
+ *
+ * ## What It Does
+ *
+ * - Validates function arguments (must be callable)
+ * - Validates timeout values (must be positive finite number)
+ * - Validates pool size (must be positive integer)
+ * - Validates closure objects (must be non-null object)
+ *
+ * ## Design Principles
+ *
+ * 1. **Fail fast** - throw immediately on invalid input
+ * 2. **Clear messages** - error messages explain what went wrong
+ * 3. **Type guards** - functions act as TypeScript assertion functions
+ * 4. **No side effects** - pure validation, no state changes
+ *
  * @module bee-threads/validation
  */
 

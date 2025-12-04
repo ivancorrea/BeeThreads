@@ -1,5 +1,23 @@
 /**
  * @fileoverview Utility functions for bee-threads.
+ *
+ * ## Why This File Exists
+ *
+ * Contains small, reusable utility functions used across the codebase.
+ * Keeping these separate avoids code duplication and makes testing easier.
+ *
+ * ## What It Does
+ *
+ * - `deepFreeze()` - recursively freezes objects to prevent mutation
+ * - `sleep()` - Promise-based delay utility for retry logic
+ * - `calculateBackoff()` - exponential backoff with jitter for retries
+ *
+ * ## Why Jitter in Backoff?
+ *
+ * When multiple tasks fail and retry simultaneously, they'd all retry
+ * at the same intervals, causing "thundering herd" problems. Adding
+ * ±25% jitter spreads out the retries randomly.
+ *
  * @module bee-threads/utils
  */
 
@@ -16,12 +34,13 @@
 export function deepFreeze<T>(obj: T): Readonly<T> {
   if (obj === null || typeof obj !== 'object') return obj;
   
-  Object.keys(obj as object).forEach(key => {
-    const value = (obj as Record<string, unknown>)[key];
+  const keys = Object.keys(obj as object);
+  for (let i = 0, len = keys.length; i < len; i++) {
+    const value = (obj as Record<string, unknown>)[keys[i]];
     if (typeof value === 'object' && value !== null) {
       deepFreeze(value);
     }
-  });
+  }
   
   return Object.freeze(obj);
 }

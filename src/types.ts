@@ -1,5 +1,28 @@
 /**
  * @fileoverview Type definitions for bee-threads.
+ *
+ * ## Why This File Exists
+ *
+ * Centralizes all TypeScript type definitions in one place. This enables:
+ * - Full IntelliSense support in IDEs
+ * - Compile-time type checking
+ * - Self-documenting code through type annotations
+ * - Easy type imports for library consumers
+ *
+ * ## What It Does
+ *
+ * - Defines pool configuration types (`PoolConfig`, `ConfigureOptions`)
+ * - Defines worker communication types (`WorkerMessage`, `WorkerResponse`)
+ * - Defines execution types (`ExecutionOptions`, `Priority`)
+ * - Defines cache types (`LRUCache`, `FunctionCache`)
+ * - Defines logger interface (compatible with Pino, Winston, console)
+ *
+ * ## Technical Decisions
+ *
+ * - Uses `as const` objects instead of TypeScript enums for better tree-shaking
+ * - Discriminated unions for message types enable exhaustive type checking
+ * - Logger interface is minimal but compatible with popular loggers
+ *
  * @module bee-threads/types
  */
 

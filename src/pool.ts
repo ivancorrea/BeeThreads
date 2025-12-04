@@ -51,7 +51,7 @@ interface TemporaryWorker extends Worker {
  */
 export function fastHash(str: string): string {
   let hash = 5381;
-  for (let i = 0; i < str.length; i++) {
+  for (let i = 0, len = str.length; i < len; i++) {
     hash = ((hash << 5) + hash) ^ str.charCodeAt(i);
   }
   return (hash >>> 0).toString(36);
@@ -139,7 +139,7 @@ export async function warmupPool(poolType: PoolType, count: number): Promise<voi
   const script = SCRIPTS[poolType];
   const toCreate = Math.min(count, config.poolSize) - pool.length;
 
-  for (let i = 0; i < toCreate; i++) {
+  for (let i = 0, len = toCreate; i < len; i++) {
     const entry = createWorkerEntry(script, poolType);
     pool.push(entry);
   }
@@ -166,7 +166,8 @@ export function getWorker(poolType: PoolType, fnHash: string | null = null): Get
 
   // Strategy 1: Find idle worker with affinity match
   if (fnHash && counters.idle > 0) {
-    for (const entry of pool) {
+    for (let i = 0, len = pool.length; i < len; i++) {
+      const entry = pool[i];
       if (!entry.busy && entry.cachedFunctions.has(fnHash)) {
         entry.busy = true;
         counters.busy++;
@@ -175,6 +176,7 @@ export function getWorker(poolType: PoolType, fnHash: string | null = null): Get
           clearTimeout(entry.terminationTimer);
         }
         metrics.affinityHits++;
+        // Monomorphic return shape - always same properties
         return { entry, worker: entry.worker, temporary: false, affinityHit: true };
       }
     }
@@ -186,7 +188,8 @@ export function getWorker(poolType: PoolType, fnHash: string | null = null): Get
     let selected: WorkerEntry | null = null;
     let minTasks = Infinity;
 
-    for (const entry of pool) {
+    for (let i = 0, len = pool.length; i < len; i++) {
+      const entry = pool[i];
       if (!entry.busy) {
         if (entry.tasksExecuted === 0) {
           selected = entry;
@@ -206,6 +209,7 @@ export function getWorker(poolType: PoolType, fnHash: string | null = null): Get
       if (selected.terminationTimer) {
         clearTimeout(selected.terminationTimer);
       }
+      // Monomorphic return shape - always same properties
       return { entry: selected, worker: selected.worker, temporary: false, affinityHit: false };
     }
   }
@@ -217,7 +221,8 @@ export function getWorker(poolType: PoolType, fnHash: string | null = null): Get
     // Only increment busy - new worker wasn't idle before
     counters.busy++;
     pool.push(entry);
-    return { entry, worker: entry.worker, temporary: false };
+    // Monomorphic return shape - always same properties
+    return { entry, worker: entry.worker, temporary: false, affinityHit: false };
   }
 
   // Strategy 4: Create temporary worker
@@ -243,7 +248,8 @@ export function getWorker(poolType: PoolType, fnHash: string | null = null): Get
     tempWorker._startTime = Date.now();
     metrics.temporaryWorkersCreated++;
     metrics.activeTemporaryWorkers++;
-    return { entry: null, worker: tempWorker, temporary: true };
+    // Monomorphic return shape - always same properties
+    return { entry: null, worker: tempWorker, temporary: true, affinityHit: false };
   }
 
   // Must queue
@@ -368,8 +374,8 @@ export function requestWorker(
     return Promise.reject(new QueueFullError(config.maxQueueSize));
   }
 
-  const validPriorities: Priority[] = ['high', 'normal', 'low'];
-  const queuePriority = validPriorities.includes(priority) ? priority : 'normal';
+  // O(1) lookup instead of array.includes()
+  const queuePriority = (priority === 'high' || priority === 'normal' || priority === 'low') ? priority : 'normal';
 
   return new Promise((resolve, reject) => {
     const task: QueuedTask = {

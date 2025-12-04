@@ -1,13 +1,38 @@
 /**
  * @fileoverview Fluent API builder for bee-threads.
  *
- * This module implements the immutable builder pattern for task execution.
- * Each method returns a NEW executor instance, allowing safe reuse.
+ * ## Why This File Exists
  *
- * @example
+ * Provides the chainable "builder" API that makes bee-threads ergonomic.
+ * Implements the immutable builder pattern - each method returns a NEW
+ * executor instance, allowing safe configuration reuse.
+ *
+ * ## What It Does
+ *
+ * - Creates chainable executor instances
+ * - Validates inputs before execution (fail-fast)
+ * - Accumulates configuration immutably
+ * - Delegates actual execution to `execution.ts`
+ *
+ * ## Fluent API Methods
+ *
+ * - `.usingParams(...args)` - set function arguments
+ * - `.setContext({...})` - inject closure variables
+ * - `.signal(AbortSignal)` - enable cancellation
+ * - `.transfer([...])` - zero-copy ArrayBuffer transfer
+ * - `.retry({ maxAttempts, baseDelay })` - enable retry with backoff
+ * - `.priority('high'|'normal'|'low')` - set queue priority
+ * - `.execute()` - run the task
+ *
+ * ## Why Immutable?
+ *
+ * Immutable builders allow safe reuse:
+ *
+ * ```js
  * const base = beeThreads.run(fn).setContext({ API_KEY });
- * await base.usingParams(1).execute();  // Safe to reuse
- * await base.usingParams(2).execute();  // Same context, different params
+ * await base.usingParams(1).execute(); // Safe to reuse
+ * await base.usingParams(2).execute(); // Same context, different params
+ * ```
  *
  * @module bee-threads/executor
  * @internal
@@ -58,7 +83,7 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
       return createExecutor<T>({
         fnString,
         options,
-        args: [...args, ...params]
+        args: args.length > 0 ? args.concat(params) : params
       });
     },
 
@@ -70,7 +95,10 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
         throw new TypeError('setContext() requires a non-null object');
       }
       // Validate that context doesn't contain non-serializable values
-      for (const [key, value] of Object.entries(context)) {
+      const contextKeys = Object.keys(context);
+      for (let i = 0, len = contextKeys.length; i < len; i++) {
+        const key = contextKeys[i];
+        const value = context[key];
         if (typeof value === 'function') {
           throw new TypeError(
             `setContext() key "${key}" contains a function which cannot be serialized. ` +
@@ -137,9 +165,9 @@ export function createExecutor<T = unknown>(state: ExecutorState): Executor<T> {
      * Sets the task priority for queue ordering.
      */
     priority(level: Priority): Executor<T> {
-      const validPriorities = ['high', 'normal', 'low'];
-      if (!validPriorities.includes(level)) {
-        throw new TypeError(`Invalid priority "${level}". Use: ${validPriorities.join(', ')}`);
+      // O(1) lookup instead of array.includes()
+      if (level !== 'high' && level !== 'normal' && level !== 'low') {
+        throw new TypeError(`Invalid priority "${level}". Use: high, normal, low`);
       }
       return createExecutor<T>({
         fnString,

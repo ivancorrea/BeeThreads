@@ -172,7 +172,7 @@ function createSandbox(context?: Record<string, unknown> | null): Record<string,
   // Apply user context as own properties (overwrites if needed)
   if (context) {
     const keys = Object.keys(context);
-    for (let i = 0; i < keys.length; i++) {
+    for (let i = 0, len = keys.length; i < len; i++) {
       sandbox[keys[i]] = context[keys[i]];
     }
   }
@@ -316,7 +316,7 @@ export function createLRUCache<T>(maxSize: number = DEFAULT_MAX_SIZE, ttl: numbe
  */
 function fastHash(str: string): string {
   let hash = 5381;
-  for (let i = 0; i < str.length; i++) {
+  for (let i = 0, len = str.length; i < len; i++) {
     hash = ((hash << 5) + hash) ^ str.charCodeAt(i);
   }
   return (hash >>> 0).toString(36);
@@ -339,7 +339,9 @@ function createContextKey(context: unknown, level: number = 0): string {
   if (context === undefined) {
     return ''; // Undefined as empty string
   }
-  if (context === null || ['string', 'number', 'boolean'].includes(typeof context)) {
+  // O(1) type check instead of array.includes()
+  const ctxType = typeof context;
+  if (context === null || ctxType === 'string' || ctxType === 'number' || ctxType === 'boolean') {
     return String(context); // Primitive as string
   }
   if (context instanceof Date) {
@@ -356,20 +358,40 @@ function createContextKey(context: unknown, level: number = 0): string {
   level++;
 
   // Handle arrays recursively. Return string as "[item1,item2,...]"
+  // Optimized: single loop instead of .map().filter().join() chain
   if (Array.isArray(context)) {
-    return '[' + context.map(item => createContextKey(item, level)).filter(Boolean).join(',') + ']';
+    let arrResult = '[';
+    let first = true;
+    for (let i = 0, len = context.length; i < len; i++) {
+      const itemKey = createContextKey(context[i], level);
+      if (itemKey) {
+        if (!first) arrResult += ',';
+        arrResult += itemKey;
+        first = false;
+      }
+    }
+    return arrResult + ']';
   }
 
   const keys = Object.keys(context) as Array<keyof typeof context>;
-  if (!keys.length) return '';
+  const keysLen = keys.length;
+  if (!keysLen) return '';
 
   // Handle objects recursively. Sort for deterministic ordering.
-  const parts = keys.sort().map(key => {
+  // Optimized: single loop instead of .sort().map().filter().join() chain
+  keys.sort();
+  let objResult = '{';
+  let first = true;
+  for (let i = 0; i < keysLen; i++) {
+    const key = keys[i];
     const value = createContextKey(context[key], level);
-    return value ? `${key}:${value}` : '';
-  }).filter(Boolean);
-
-  return '{' + parts.join('&') + '}';
+    if (value) {
+      if (!first) objResult += '&';
+      objResult += key + ':' + value;
+      first = false;
+    }
+  }
+  return objResult + '}';
 }
 
 /**

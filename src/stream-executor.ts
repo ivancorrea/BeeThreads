@@ -1,10 +1,44 @@
 /**
  * @fileoverview Stream executor for generator functions.
  *
- * Fluent API:
+ * ## Why This File Exists
+ *
+ * Regular functions return a single value, but generators can yield
+ * multiple values over time. This file enables streaming those values
+ * back to the main thread as they're produced, rather than waiting
+ * for all results at once.
+ *
+ * ## What It Does
+ *
+ * - Creates a `ReadableStream` from generator functions
+ * - Streams yielded values as they're produced (memory efficient)
+ * - Captures the return value for access after completion
+ * - Handles async generators (yields that return Promises)
+ * - Supports cancellation via stream.cancel()
+ *
+ * ## Fluent API
+ *
  * - `.usingParams(...args)` - set generator arguments
  * - `.setContext({...})` - inject closure variables
+ * - `.transfer([...])` - zero-copy ArrayBuffer transfer
  * - `.execute()` - start streaming
+ *
+ * ## Example
+ *
+ * ```js
+ * const stream = beeThreads
+ *   .stream(function* (n) {
+ *     for (let i = 1; i <= n; i++) yield i * i;
+ *     return 'done';
+ *   })
+ *   .usingParams(5)
+ *   .execute();
+ *
+ * for await (const value of stream) {
+ *   console.log(value); // 1, 4, 9, 16, 25
+ * }
+ * console.log(stream.returnValue); // 'done'
+ * ```
  *
  * @module bee-threads/stream-executor
  */
@@ -53,7 +87,7 @@ export function createStreamExecutor<T = unknown>(state: StreamExecutorState): S
       return createStreamExecutor<T>({
         fnString,
         context,
-        args: [...args, ...params],
+        args: args.length > 0 ? args.concat(params) : params,
         transfer
       });
     },
@@ -66,7 +100,10 @@ export function createStreamExecutor<T = unknown>(state: StreamExecutorState): S
         throw new TypeError('setContext() requires a non-null object');
       }
       // Validate that context doesn't contain non-serializable values
-      for (const [key, value] of Object.entries(ctx)) {
+      const ctxKeys = Object.keys(ctx);
+      for (let i = 0, len = ctxKeys.length; i < len; i++) {
+        const key = ctxKeys[i];
+        const value = ctx[key];
         if (typeof value === 'function') {
           throw new TypeError(
             `setContext() key "${key}" contains a function which cannot be serialized. ` +
@@ -174,13 +211,18 @@ export function createStreamExecutor<T = unknown>(state: StreamExecutorState): S
                     }
                     // Reconstruct AggregateError.errors
                     if (Array.isArray(data.errors)) {
-                      (e as unknown as Record<string, unknown>).errors = data.errors.map(
-                        (x: unknown) => reconstructError(x as Record<string, unknown>)
-                      );
+                      const errArray = data.errors;
+                      const reconstructedErrors = new Array(errArray.length);
+                      for (let k = 0, klen = errArray.length; k < klen; k++) {
+                        reconstructedErrors[k] = reconstructError(errArray[k] as Record<string, unknown>);
+                      }
+                      (e as unknown as Record<string, unknown>).errors = reconstructedErrors;
                     }
                     // Copy other custom properties
-                    for (const key of Object.keys(data)) {
-                      if (!['name', 'message', 'stack', '_sourceCode', 'cause', 'errors'].includes(key)) {
+                    const dataKeys = Object.keys(data);
+                    for (let j = 0, jlen = dataKeys.length; j < jlen; j++) {
+                      const key = dataKeys[j];
+                      if (key !== 'name' && key !== 'message' && key !== 'stack' && key !== '_sourceCode' && key !== 'cause' && key !== 'errors') {
                         (e as unknown as Record<string, unknown>)[key] = data[key];
                       }
                     }

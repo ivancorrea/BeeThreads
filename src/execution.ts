@@ -1,12 +1,35 @@
 /**
  * @fileoverview Core execution engine for bee-threads.
  *
- * This is the heart of task execution. It orchestrates:
- * 1. Acquiring a worker from the pool (with affinity preference)
- * 2. Sending the task to the worker
- * 3. Handling responses, errors, and timeouts
- * 4. Releasing the worker back to the pool
- * 5. Tracking metrics for monitoring
+ * ## Why This File Exists
+ *
+ * This is the heart of task execution. It orchestrates the entire lifecycle
+ * of a task from worker acquisition to result delivery. Separating this
+ * logic allows the public API (`executor.ts`) to remain clean and focused
+ * on the builder pattern.
+ *
+ * ## What It Does
+ *
+ * 1. Acquires a worker from the pool (with affinity preference)
+ * 2. Sends the task to the worker via postMessage
+ * 3. Handles responses, errors, and timeouts
+ * 4. Releases the worker back to the pool
+ * 5. Tracks metrics for monitoring
+ * 6. Implements retry with exponential backoff
+ *
+ * ## Critical Implementation Details
+ *
+ * ### Race Condition Prevention (v3.1.2+)
+ *
+ * The `settled` flag must be set BEFORE calling `worker.terminate()`.
+ * This prevents a race condition where the async 'exit' event could
+ * fire before our timeout/abort handler completes.
+ *
+ * ### Error Reconstruction
+ *
+ * Errors are serialized in workers and reconstructed here. Custom
+ * properties (code, statusCode, etc.) are preserved. Error.cause
+ * and AggregateError.errors are recursively reconstructed.
  *
  * @module bee-threads/execution
  */
@@ -152,14 +175,19 @@ export async function executeOnce<T = unknown>(
         
         // Reconstruct AggregateError.errors
         if (Array.isArray(errorData.errors)) {
-          (err as unknown as Record<string, unknown>).errors = errorData.errors.map(
-            (e: unknown) => reconstructError(e as Record<string, unknown>)
-          );
+          const errArray = errorData.errors;
+          const reconstructedErrors = new Array(errArray.length);
+          for (let j = 0, jlen = errArray.length; j < jlen; j++) {
+            reconstructedErrors[j] = reconstructError(errArray[j] as Record<string, unknown>);
+          }
+          (err as unknown as Record<string, unknown>).errors = reconstructedErrors;
         }
         
         // Copy other custom properties (code, statusCode, etc.)
-        for (const key of Object.keys(errorData)) {
-          if (!['name', 'message', 'stack', '_sourceCode', 'cause', 'errors'].includes(key)) {
+        const errorDataKeys = Object.keys(errorData);
+        for (let i = 0, len = errorDataKeys.length; i < len; i++) {
+          const key = errorDataKeys[i];
+          if (key !== 'name' && key !== 'message' && key !== 'stack' && key !== '_sourceCode' && key !== 'cause' && key !== 'errors') {
             (err as unknown as Record<string, unknown>)[key] = errorData[key];
           }
         }
@@ -294,7 +322,7 @@ export async function execute<T = unknown>(
   const { maxAttempts, baseDelay, maxDelay, backoffFactor } = retryOpts;
   let lastError: Error | undefined;
 
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+  for (let attempt = 0, len = maxAttempts; attempt < len; attempt++) {
     try {
       const result = await executeOnce<T>(fn, args, { ...options, safe: false });
       return safe ? { status: 'fulfilled', value: result as T } : (result as T);

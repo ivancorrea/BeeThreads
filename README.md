@@ -5,6 +5,27 @@
 
 > Worker threads with zero boilerplate. Zero dependencies.
 
+```js
+// worker.js
+module.exports = (x) => x * 2;
+
+// main.js
+const { Worker } = require('worker_threads');
+const worker = new Worker('./worker.js');
+worker.postMessage(21);
+worker.on('message', (result) => {
+  console.log(result); // 42
+});
+worker.on('error', handleError);
+worker.on('exit', handleExit);
+// ... 50+ lines of boilerplate ...
+
+
+// bee-threads
+// ==========================================
+const result = await bee((x) => x * 2)(21);  // 42
+```
+
 ```bash
 npm install bee-threads
 ```
