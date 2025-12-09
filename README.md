@@ -201,64 +201,67 @@ Process large arrays across **ALL CPU cores** with **fail-fast** error handling.
 ### Usage
 
 ```js
-// Map - transform each item in parallel
-const results = await beeThreads
-	.turbo((item, index) => {
-		// Each item processed by a different worker
-		return Math.sqrt(item) * Math.sin(item)
-	})
-	.map(largeArray)
+// Map
+const squares = await beeThreads.turbo(x => x * x).map(numbers)
 
-// TypedArray - uses SharedArrayBuffer (zero-copy!)
-const data = new Float64Array(1_000_000)
-const processed = await beeThreads
-	.turbo((value, index) => {
-		// Heavy math on each element
-		return value * value + Math.log(value + 1)
-	})
-	.map(data)
+// Filter
+const evens = await beeThreads.turbo(x => x % 2 === 0).filter(numbers)
 
-// Filter - parallel predicate evaluation
-const evens = await beeThreads
-	.turbo((num, index) => {
-		return num % 2 === 0 // Returns true/false
-	})
-	.filter(numbers)
+// Reduce
+const sum = await beeThreads.turbo((a, b) => a + b).reduce(numbers, 0)
 
-// Reduce - parallel tree reduction
-const sum = await beeThreads
-	.turbo((accumulator, currentValue) => {
-		return accumulator + currentValue
-	})
-	.reduce(numbers, 0)
+// TypedArray (SharedArrayBuffer - 4x faster!)
+const pixels = new Float64Array(1_000_000)
+const bright = await beeThreads.turbo(x => Math.min(255, x * 1.2)).map(pixels)
 
-// With context variables
-const threshold = 100
-const filtered = await beeThreads
-	.turbo(
-		(item, index) => item > threshold,
-		{ context: { threshold } }
-	)
-	.filter(data)
+// With context
+const factor = 2.5
+await beeThreads.turbo(x => x * factor, { context: { factor } }).map(data)
 
-// With execution stats
-const { data: results, stats } = await beeThreads
-	.turbo((x) => Math.sqrt(x) * Math.sin(x))
-	.mapWithStats(array)
+// With stats
+const { data, stats } = await beeThreads.turbo(x => x * x).mapWithStats(arr)
+console.log(stats.speedupRatio) // "7.2x"
+```
 
-console.log(`Workers: ${stats.workersUsed}, Speedup: ${stats.speedupRatio}`)
+### Image & Video Processing
+
+```js
+// 🖼️ Image: Grayscale conversion (1920x1080 = 2M pixels)
+const imageBuffer = new Uint8Array(rawPixelData)
+const grayscale = await beeThreads
+	.turbo(v => Math.round(v * 0.299)) // Simplified grayscale
+	.map(imageBuffer)
+
+// 🎬 Video: Process frames with generator (memory efficient)
+const stream = beeThreads.stream(function* (videoPath) {
+	const decoder = createVideoDecoder(videoPath)
+	for (const frame of decoder) {
+		yield processFrame(frame) // Yields each frame as processed
+	}
+}).usingParams('video.mp4').execute()
+
+for await (const processedFrame of stream) {
+	writeFrame(processedFrame) // Stream to output without loading all in memory
+}
+
+// 🔥 Batch process video frames with turbo
+const frames = extractFrames('video.mp4') // Array of Uint8Array
+const processed = await Promise.all(
+	frames.map(frame => beeThreads.turbo(px => px * 1.2).map(frame))
+)
 ```
 
 ### When to Use
 
-| Scenario              | `bee()` | `turbo()` |
-| --------------------- | ------- | --------- |
-| Single heavy task     | ✅      | ❌        |
-| 10K+ items            | ❌      | ✅        |
-| TypedArray operations | ❌      | ✅✅✅    |
-| Small arrays (<10K)   | ✅      | ❌        |
+| Scenario | `bee()` | `turbo()` | `stream()` |
+| -------- | ------- | --------- | ---------- |
+| Single task | ✅ | ❌ | ❌ |
+| 10K+ items | ❌ | ✅ | ❌ |
+| TypedArray/Image | ❌ | ✅✅✅ | ❌ |
+| Video frames | ❌ | ✅ | ✅✅✅ |
+| Memory-constrained | ❌ | ❌ | ✅✅✅ |
 
-> **Auto-fallback:** Arrays < 10K items automatically use single-worker mode (overhead > benefit).
+> **Auto-fallback:** Arrays < 10K items automatically use single-worker mode.
 
 ---
 
