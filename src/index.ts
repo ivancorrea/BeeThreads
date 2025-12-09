@@ -409,10 +409,10 @@ export const beeThreads = {
    *   .map(data);
    * ```
    */
-  turbo<T = unknown>(
-    fn: (...args: any[]) => T,
+  turbo<TInput, TOutput>(
+    fn: (item: TInput, index: number) => TOutput,
     options?: TurboOptions
-  ): TurboExecutor<T> {
+  ): TurboExecutor<TOutput, TInput> {
     if (typeof fn !== 'function') {
       throw new TypeError(`turbo() requires a function, got ${typeof fn}`);
     }
@@ -431,7 +431,7 @@ export const beeThreads = {
       validateContextSecurity(options.context);
     }
 
-    return createTurboExecutor<T>(fn, options || {});
+    return createTurboExecutor<TOutput, TInput>(fn, options || {});
   },
 
   /**

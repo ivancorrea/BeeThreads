@@ -203,7 +203,7 @@ function isNumericTypedArray(value: unknown): value is NumericTypedArray {
  * console.log(stats.speedupRatio); // "7.2x"
  * ```
  */
-export interface TurboExecutor<T> {
+export interface TurboExecutor<T, TInput = unknown> {
   /**
    * Applies the function to each item in parallel across all workers.
    * Returns the transformed array.
@@ -213,10 +213,11 @@ export interface TurboExecutor<T> {
    *
    * @example
    * ```typescript
-   * const squares = await beeThreads.turbo((x) => x * x).map(numbers);
+   * const squares = await beeThreads.turbo((x: number) => x * x).map([1, 2, 3]);
+   * // squares: number[]
    * ```
    */
-  map<D extends unknown[] | NumericTypedArray>(data: D): Promise<D extends NumericTypedArray ? D : T[]>;
+  map<D extends TInput[] | NumericTypedArray>(data: D): Promise<D extends NumericTypedArray ? D : T[]>;
 
   /**
    * Same as map() but also returns execution statistics.
@@ -226,25 +227,25 @@ export interface TurboExecutor<T> {
    *
    * @example
    * ```typescript
-   * const { data, stats } = await beeThreads.turbo((x) => x * x).mapWithStats(numbers);
+   * const { data, stats } = await beeThreads.turbo((x: number) => x * x).mapWithStats([1, 2, 3]);
    * console.log(`Processed ${stats.totalItems} items in ${stats.executionTime}ms`);
-   * console.log(`Speedup: ${stats.speedupRatio}`);
    * ```
    */
-  mapWithStats<D extends unknown[] | NumericTypedArray>(data: D): Promise<TurboResult<D extends NumericTypedArray ? number : T>>;
+  mapWithStats<D extends TInput[] | NumericTypedArray>(data: D): Promise<TurboResult<D extends NumericTypedArray ? number : T>>;
 
   /**
    * Filters items in parallel, keeping only those where predicate returns true.
    *
    * @param data - Array to filter
-   * @returns Promise resolving to filtered array
+   * @returns Promise resolving to filtered array (same type as input)
    *
    * @example
    * ```typescript
-   * const evens = await beeThreads.turbo((x) => x % 2 === 0).filter(numbers);
+   * const evens = await beeThreads.turbo((x: number) => x % 2 === 0).filter([1, 2, 3, 4]);
+   * // evens: number[]
    * ```
    */
-  filter(data: unknown[]): Promise<unknown[]>;
+  filter<U>(data: U[]): Promise<U[]>;
 
   /**
    * Reduces array using parallel tree reduction.
@@ -256,8 +257,8 @@ export interface TurboExecutor<T> {
    *
    * @example
    * ```typescript
-   * const sum = await beeThreads.turbo((a, b) => a + b).reduce(numbers, 0);
-   * const max = await beeThreads.turbo((a, b) => Math.max(a, b)).reduce(numbers, -Infinity);
+   * const sum = await beeThreads.turbo((a: number, b: number) => a + b).reduce([1, 2, 3], 0);
+   * // sum: number
    * ```
    */
   reduce<R>(data: unknown[], initialValue: R): Promise<R>;
@@ -282,23 +283,23 @@ export interface TurboExecutor<T> {
  * ).map(data);
  * ```
  */
-export function createTurboExecutor<T>(
+export function createTurboExecutor<T, TInput = unknown>(
   fn: Function,
   options: TurboOptions = {}
-): TurboExecutor<T> {
+): TurboExecutor<T, TInput> {
   const fnString = fn.toString();
 
   return {
-    async map<D extends unknown[] | NumericTypedArray>(data: D): Promise<D extends NumericTypedArray ? D : T[]> {
-      const result = await executeTurboMap<T>(fnString, data, options);
+    async map<D extends TInput[] | NumericTypedArray>(data: D): Promise<D extends NumericTypedArray ? D : T[]> {
+      const result = await executeTurboMap<T>(fnString, data as unknown[] | NumericTypedArray, options);
       return result as D extends NumericTypedArray ? D : T[];
     },
 
-    async mapWithStats<D extends unknown[] | NumericTypedArray>(
+    async mapWithStats<D extends TInput[] | NumericTypedArray>(
       data: D
     ): Promise<TurboResult<D extends NumericTypedArray ? number : T>> {
       const startTime = Date.now();
-      const [result, stats] = await executeTurboMapWithStats<T>(fnString, data, options);
+      const [result, stats] = await executeTurboMapWithStats<T>(fnString, data as unknown[] | NumericTypedArray, options);
       stats.executionTime = Date.now() - startTime;
       return {
         data: result as (D extends NumericTypedArray ? number : T)[],
@@ -306,8 +307,8 @@ export function createTurboExecutor<T>(
       };
     },
 
-    async filter(data: unknown[]): Promise<unknown[]> {
-      return executeTurboFilter(fnString, data, options);
+    async filter<U>(data: U[]): Promise<U[]> {
+      return executeTurboFilter(fnString, data, options) as Promise<U[]>;
     },
 
     async reduce<R>(data: unknown[], initialValue: R): Promise<R> {
