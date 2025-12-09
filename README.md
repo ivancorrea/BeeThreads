@@ -24,13 +24,13 @@ npm install bee-threads
 ```js
 const { bee } = require('bee-threads')
 
-//Run any function in a separate thread - promise like
+// Run any function in a separate thread - promise style
 const result = await bee(x => x * 2)(21) // 42
 
-//Non Blocking I/O in any CPU-Itensive operation.
+// Non-blocking CPU-intensive operations
 const hash = await bee(pwd => require('crypto').pbkdf2Sync(pwd, 'salt', 100000, 64, 'sha512').toString('hex'))('password123')
 
-//Run with Promise.all
+// Run with Promise.all
 const [a, b, c] = await Promise.all([bee(x => x * 2)(21), bee(x => x + 1)(41), bee(() => 'hello')()])
 ```
 
@@ -93,8 +93,7 @@ const result = await bee(x => x * 2)(21)
 // ✅ Error handling (try/catch works)
 // ✅ TypeScript support
 // ✅ Zero dependencies
-// ✅ Easy Sintax
-// ✅ Promise like sintax !!
+// ✅ Promise-like syntax
 ```
 
 </td>
@@ -134,13 +133,8 @@ await beeThreads
 
 ### `.usingParams(...args)`
 
-Pass arguments to the function:
-
 ```js
-await beeThreads
-	.run((a, b) => a + b)
-	.usingParams(10, 20)
-	.execute() // → 30
+await beeThreads.run((a, b) => a + b).usingParams(10, 20).execute() // → 30
 ```
 
 ### `.setContext({ vars })`
@@ -149,91 +143,130 @@ Inject external variables (closures):
 
 ```js
 const TAX = 0.2
-await beeThreads
-	.run(p => p * (1 + TAX))
-	.usingParams(100)
-	.setContext({ TAX })
-	.execute() // → 120
+await beeThreads.run(p => p * (1 + TAX)).usingParams(100).setContext({ TAX }).execute() // → 120
 ```
 
-> **Note:** Context values must be serializable (no functions or Symbols).
-
-### `.signal(AbortSignal)`
-
-Enable cancellation:
+### `.signal(AbortSignal)` / `.retry(options)` / `.priority(level)` / `.transfer([ArrayBuffer])`
 
 ```js
+// Cancellation
 const ctrl = new AbortController()
-setTimeout(() => ctrl.abort(), 1000)
-await beeThreads
-	.run(() => longTask())
-	.signal(ctrl.signal)
-	.execute()
-```
+await beeThreads.run(() => longTask()).signal(ctrl.signal).execute()
 
-### `.retry(options)`
+// Auto-retry
+await beeThreads.run(() => unstableApi()).retry({ maxAttempts: 3, baseDelay: 100 }).execute()
 
-Auto-retry on failure:
+// Priority ('high' | 'normal' | 'low')
+await beeThreads.run(() => critical()).priority('high').execute()
 
-```js
-await beeThreads
-	.run(() => unstableApi())
-	.retry({ maxAttempts: 3, baseDelay: 100 })
-	.execute()
-```
-
-### `.priority(level)`
-
-Queue priority (`'high'` | `'normal'` | `'low'`):
-
-```js
-await beeThreads
-	.run(() => critical())
-	.priority('high')
-	.execute()
-```
-
-### `.transfer([ArrayBuffer])`
-
-Zero-copy for large binary data:
-
-```js
+// Zero-copy binary transfer
 const buf = new ArrayBuffer(1024)
-await beeThreads
-	.run(b => process(b))
-	.usingParams(buf)
-	.transfer([buf])
-	.execute()
+await beeThreads.run(b => process(b)).usingParams(buf).transfer([buf]).execute()
 ```
 
-### `.noCoalesce()`
+---
 
-Disable request coalescing for this specific execution:
+## ⚡ Turbo Mode - Parallel Array Processing
+
+Process large arrays across **ALL CPU cores** with **fail-fast** error handling.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  beeThreads.turbo(fn).map([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) │
+└─────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+        ┌─────────────────────────────────────────┐
+        │         SPLIT INTO BATCHES              │
+        │    (auto-calculated per worker)         │
+        └─────────────────────────────────────────┘
+                              │
+          ┌───────────────────┼───────────────────┐
+          ▼                   ▼                   ▼
+   ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+   │  Worker 1   │     │  Worker 2   │     │  Worker 3   │
+   │ [1,2,3,4]   │     │ [5,6,7,8]   │     │ [9,10,11,12]│
+   │  fn(item)   │     │  fn(item)   │     │  fn(item)   │
+   └─────────────┘     └─────────────┘     └─────────────┘
+          │                   │                   │
+          │              ❌ ERROR!                │
+          │                   │                   │
+          ▼                   ▼                   ▼
+   ┌─────────────────────────────────────────────────────┐
+   │  FAIL-FAST: All workers abort, Promise rejects     │
+   │  Resources cleaned up, error propagated to caller  │
+   └─────────────────────────────────────────────────────┘
+```
+
+### Usage
 
 ```js
-await beeThreads
-	.run(() => Date.now())
-	.noCoalesce()
-	.execute() // Always runs independently
+// Map - transform each item in parallel
+const results = await beeThreads.turbo(x => Math.sqrt(x)).map(largeArray)
+
+// TypedArray - uses SharedArrayBuffer (zero-copy!)
+const data = new Float64Array(1_000_000)
+const processed = await beeThreads.turbo(x => x * x).map(data)
+
+// Filter - parallel predicate evaluation
+const evens = await beeThreads.turbo(x => x % 2 === 0).filter(numbers)
+
+// Reduce - parallel tree reduction
+const sum = await beeThreads.turbo((a, b) => a + b).reduce(numbers, 0)
+
+// With execution stats
+const { data, stats } = await beeThreads.turbo(x => heavyMath(x)).mapWithStats(array)
+console.log(`Workers: ${stats.workersUsed}, Speedup: ${stats.speedupRatio}`)
 ```
 
-### Timeout
+### When to Use
+
+| Scenario              | `bee()` | `turbo()` |
+| --------------------- | ------- | --------- |
+| Single heavy task     | ✅      | ❌        |
+| 10K+ items            | ❌      | ✅        |
+| TypedArray operations | ❌      | ✅✅✅    |
+| Small arrays (<10K)   | ✅      | ❌        |
+
+> **Auto-fallback:** Arrays < 10K items automatically use single-worker mode (overhead > benefit).
+
+---
+
+## Request Coalescing
+
+Prevents duplicate simultaneous calls from running multiple times. When the same function with identical arguments is called while a previous call is in-flight, subsequent calls share the same Promise.
 
 ```js
-await beeThreads
-	.withTimeout(5000)(data => process(data))
-	.usingParams(data)
-	.execute()
+// All 3 calls share ONE execution, return same result
+const [r1, r2, r3] = await Promise.all([
+	bee(x => expensiveComputation(x))(42),
+	bee(x => expensiveComputation(x))(42),
+	bee(x => expensiveComputation(x))(42),
+])
+
+// Control coalescing
+beeThreads.setCoalescing(false) // disable globally
+beeThreads.getCoalescingStats() // { coalesced: 15, unique: 100, coalescingRate: '13%' }
+
+// Opt-out for specific execution
+await beeThreads.run(() => Date.now()).noCoalesce().execute()
 ```
 
-> **Note:** When using `.retry()` with `.withTimeout()`, the timeout applies **per attempt**, not total.
+**Auto-detection:** Functions with `Date.now()`, `Math.random()`, `crypto.randomUUID()` are automatically excluded.
 
-### Streaming (Generators)
+---
+
+## Generators (Streaming)
+
+Stream results as they're produced instead of waiting for all:
 
 ```js
 const stream = beeThreads
 	.stream(function* (n) {
-		for (let i = 1; i <= n; i++) yield i * i
+		for (let i = 1; i <= n; i++) {
+			yield i * i // Streamed immediately
+		}
+		return 'done' // Captured in stream.returnValue
 	})
 	.usingParams(5)
 	.execute()
@@ -241,62 +274,7 @@ const stream = beeThreads
 for await (const value of stream) {
 	console.log(value) // 1, 4, 9, 16, 25
 }
-```
-
----
-
-## Configuration
-
-```js
-beeThreads.configure({
-	poolSize: 8, // Max workers (default: CPU cores)
-	minThreads: 2, // Pre-warmed workers
-	maxQueueSize: 1000, // Max pending tasks
-	workerIdleTimeout: 30000, // Cleanup idle workers (ms)
-	debugMode: true, // Show function source in errors
-	logger: console, // Custom logger (or null to disable)
-	lowMemoryMode: false, // Reduce memory (~60-80% less)
-	coalescing: true, // Enable request coalescing (default: true)
-})
-
-// Pre-warm workers
-await beeThreads.warmup(4)
-
-// Metrics
-const stats = beeThreads.getPoolStats()
-
-// Shutdown
-await beeThreads.shutdown()
-```
-
-### Request Coalescing
-
-Request coalescing (also known as "singleflight" or "promise deduplication") prevents duplicate simultaneous calls with the same parameters from running multiple times. When enabled, if the same function with the same arguments is called while a previous call is still in-flight, the subsequent calls will share the result of the first call.
-
-```js
-// Enable/disable coalescing (enabled by default)
-beeThreads.setCoalescing(true)
-
-// Check if enabled
-beeThreads.isCoalescingEnabled() // true
-
-// Get coalescing statistics
-const stats = beeThreads.getCoalescingStats()
-// { coalesced: 15, unique: 100, inFlight: 2, coalescingRate: '13.04%' }
-
-// Reset statistics
-beeThreads.resetCoalescingStats()
-```
-
-**Automatic Detection:** Functions containing non-deterministic patterns (`Date.now()`, `Math.random()`, `crypto.randomUUID()`, etc.) are automatically excluded from coalescing.
-
-**Manual Opt-out:** Use `.noCoalesce()` to exclude specific executions:
-
-```js
-await beeThreads
-	.run(() => fetchData())
-	.noCoalesce()
-	.execute()
+console.log(stream.returnValue) // 'done'
 ```
 
 ---
@@ -319,36 +297,71 @@ try {
 		/* queue full */
 	}
 	if (err instanceof WorkerError) {
-		// Custom error properties are preserved
-		console.log(err.code) // e.g., 'ERR_CUSTOM'
-		console.log(err.statusCode) // e.g., 500
+		// Custom error properties preserved
+		console.log(err.code, err.statusCode)
 	}
 }
+
+// Safe mode - never throws, returns result object
+const result = await beeThreads.run(fn).safe().execute()
+if (result.status === 'fulfilled') {
+	console.log(result.value)
+} else {
+	console.log(result.error)
+}
+```
+
+---
+
+## Configuration
+
+```js
+beeThreads.configure({
+	poolSize: 8, // Max workers (default: CPU cores)
+	minThreads: 2, // Pre-warmed workers
+	maxQueueSize: 1000, // Max pending tasks
+	workerIdleTimeout: 30000, // Cleanup idle workers (ms)
+	debugMode: true, // Show function source in errors
+	logger: console, // Custom logger (or null)
+	lowMemoryMode: false, // Reduce memory (~60-80% less)
+	coalescing: true, // Request coalescing (default: true)
+})
+
+await beeThreads.warmup(4) // Pre-warm 4 workers
+const stats = beeThreads.getPoolStats() // Metrics
+await beeThreads.shutdown() // Graceful shutdown
 ```
 
 ---
 
 ## TypeScript
 
-Full type support:
+Full type inference:
 
 ```ts
-import { bee, beeThreads } from 'bee-threads'
+import { bee, beeThreads, TimeoutError, WorkerError } from 'bee-threads'
 
 const result = await bee((x: number) => x * 2)(21) // number
+
+const stream = beeThreads
+	.stream(function* (n: number) {
+		yield n * 2
+	})
+	.usingParams(5)
+	.execute() // StreamResult<number>
 ```
 
 ---
 
 ## Limitations
 
--  **No `this` binding** - Use arrow functions or pass context via `.setContext()`
--  **No closures** - External variables must be passed via `beeClosures` or `.setContext()`
--  **Serializable only** - Arguments and return values must be serializable (no functions, Symbols, or circular refs with classes)
+- **No `this` binding** - Use arrow functions or `.setContext()`
+- **No closures** - External vars via `beeClosures` or `.setContext()`
+- **Serializable only** - No functions, Symbols, or circular refs in args/return
 
-### Worker Environment
+---
 
-Some global APIs are **not available** inside worker functions:
+## Worker Environment
 
 | API                      | Status                   |
 | ------------------------ | ------------------------ |
@@ -364,76 +377,30 @@ Some global APIs are **not available** inside worker functions:
 
 ---
 
-## ⚡ Turbo Mode - Parallel Array Processing
-
-Process large arrays using **ALL available CPU cores** with SharedArrayBuffer for zero-copy performance.
-
-```js
-// Transform 1 million items across all workers
-const results = await beeThreads.turbo((x) => Math.sqrt(x)).map(largeArray)
-
-// With TypedArray (uses SharedArrayBuffer - zero-copy!)
-const data = new Float64Array(1_000_000)
-const processed = await beeThreads.turbo((x) => x * x).map(data)
-
-// Filter in parallel
-const evens = await beeThreads.turbo((x) => x % 2 === 0).filter(numbers)
-
-// Reduce with parallel tree reduction
-const sum = await beeThreads.turbo((a, b) => a + b).reduce(numbers, 0)
-
-// Get execution stats
-const { data, stats } = await beeThreads.turbo((x) => heavyMath(x)).mapWithStats(array)
-console.log(`Speedup: ${stats.speedupRatio}`) // "7.2x"
-```
-
-### When to Use Turbo
-
-| Use Case                | `bee()`  | `turbo()` |
-| ----------------------- | -------- | --------- |
-| Single heavy task       | ✅       | ❌        |
-| Process 10K+ items      | ❌       | ✅        |
-| TypedArray math         | ❌       | ✅✅✅    |
-| Small arrays (<10K)     | ✅       | ❌        |
-| Image processing        | ❌       | ✅✅✅    |
-| Matrix operations       | ❌       | ✅✅✅    |
-
-### Performance
-
-| Array Size | Single Worker | Turbo (8 cores) | Speedup     |
-| ---------- | ------------- | --------------- | ----------- |
-| 10K items  | 45ms          | 20ms            | **2.2x**    |
-| 100K items | 450ms         | 120ms           | **3.7x**    |
-| 1M items   | 4.2s          | 580ms           | **7.2x**    |
-
-> **Note:** Turbo automatically falls back to single-worker mode for small arrays where overhead exceeds benefit.
-
----
-
 ## Use Cases
 
--  Password hashing (PBKDF2, bcrypt)
--  Image processing (sharp, jimp)
--  Large JSON parsing
--  Data compression
--  PDF generation
--  Heavy computations
--  **Large array processing** (turbo mode)
--  **Matrix operations** (turbo mode)
--  **Numerical simulations** (turbo mode)
+- Password hashing (PBKDF2, bcrypt)
+- Image processing (sharp, jimp)
+- Large JSON parsing
+- Data compression
+- PDF generation
+- Heavy computations
+- **Large array processing** (turbo mode)
+- **Matrix operations** (turbo mode)
+- **Numerical simulations** (turbo mode)
 
 ---
 
 ## Why bee-threads?
 
--  **Zero dependencies** - Lightweight and secure
--  **Inline functions** - No separate worker files
--  **Worker pool** - Reuses threads, no cold-start
--  **Function caching** - LRU cache, 300-500x faster repeated calls
--  **Worker affinity** - Same function → same worker (V8 JIT optimization)
--  **Request coalescing** - Deduplicates simultaneous identical calls
--  **Turbo mode** - Parallel array processing with SharedArrayBuffer
--  **Full TypeScript** - Complete type definitions
+- **Zero dependencies** - Lightweight and secure
+- **Inline functions** - No separate worker files
+- **Worker pool** - Reuses threads, no cold-start
+- **Function caching** - LRU cache, 300-500x faster
+- **Worker affinity** - Same function → same worker (V8 JIT)
+- **Request coalescing** - Deduplicates identical calls
+- **Turbo mode** - Parallel array processing
+- **Full TypeScript** - Complete type definitions
 
 ---
 
