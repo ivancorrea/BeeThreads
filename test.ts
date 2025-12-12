@@ -2124,7 +2124,9 @@ async function runTests(): Promise<void> {
       await beeThreads
         .run(() => {
           const cause = new Error('original cause');
-          throw new Error('wrapper error', { cause });
+          const wrapper = new Error('wrapper error');
+          (wrapper as any).cause = cause;
+          throw wrapper;
         })
         .execute();
       assert.fail('Should have thrown');
@@ -3183,7 +3185,7 @@ async function runTests(): Promise<void> {
 
   await test('turbo(arr).map(fn) processes Float64Array', async () => {
     const data = new Float64Array([1, 2, 3, 4, 5]);
-    const result = await beeThreads.turbo(data as any, { force: true }).map((x: number) => x * x);
+    const result = await beeThreads.turbo(data as unknown as number[], { force: true }).map((x: number) => x * x);
     
     assert.deepStrictEqual(result, [1, 4, 9, 16, 25]);
   });
@@ -3207,7 +3209,7 @@ async function runTests(): Promise<void> {
     for (let i = 0; i < 100; i++) data[i] = i;
     
     const { data: result, stats } = await beeThreads
-      .turbo(data as any, { force: true })
+      .turbo(data as unknown as number[], { force: true })
       .mapWithStats((x: number) => Math.sqrt(x));
     
     assert.ok(Array.isArray(result), 'Result should be array');
@@ -3283,7 +3285,7 @@ async function runTests(): Promise<void> {
     // Turbo mode
     const turboStart = Date.now();
     const { stats } = await beeThreads
-      .turbo(data as any, { force: true })
+      .turbo(data as unknown as number[], { force: true })
       .mapWithStats((x: number) => Math.sqrt(x) * Math.sin(x));
     const turboTime = Date.now() - turboStart;
     
@@ -3301,7 +3303,7 @@ async function runTests(): Promise<void> {
     // Turbo mode
     const turboStart = Date.now();
     const { stats } = await beeThreads
-      .turbo(data as any)
+      .turbo(data as unknown as number[])
       .mapWithStats((x: number) => Math.sqrt(x) * Math.sin(x));
     const turboTime = Date.now() - turboStart;
     
@@ -3396,7 +3398,7 @@ async function runTests(): Promise<void> {
 
   await test('ISOLATION: pool stats remain consistent after turbo', async () => {
     const statsBefore = beeThreads.getPoolStats();
-    const workersBefore = statsBefore.workers;
+    const workersBefore = statsBefore.normal.size;
     
     // Run turbo
     await beeThreads.turbo([1, 2, 3, 4, 5], { force: true }).map((x: number) => x * 2);
@@ -3405,7 +3407,7 @@ async function runTests(): Promise<void> {
     await bee((x: number) => x + 1)(5);
     
     const statsAfter = beeThreads.getPoolStats();
-    const workersAfter = statsAfter.workers;
+    const workersAfter = statsAfter.normal.size;
     
     assert.strictEqual(workersBefore, workersAfter, 'Worker count must remain stable');
   });
@@ -3589,8 +3591,10 @@ async function runTests(): Promise<void> {
   section('Turbo Mode - Coexistence with Other Features');
 
   await test('COEXIST: turbo with context + normal bee with context', async () => {
-    const turboCtx = { multiplier: 5 };
-    const beeCtx = { offset: 100 };
+    const multiplier = 5;
+    const offset = 100;
+    const turboCtx = { multiplier };
+    const beeCtx = { offset };
     
     const turboResult = await beeThreads
       .turbo([1, 2, 3], { force: true, context: turboCtx })
@@ -3681,7 +3685,7 @@ async function runTests(): Promise<void> {
     // Measure turbo
     const turboStart = Date.now();
     const { stats } = await beeThreads
-      .turbo(data as any)
+      .turbo(data as unknown as number[])
       .mapWithStats((x: number) => Math.sqrt(x) * Math.sin(x));
     const turboTime = Date.now() - turboStart;
     
@@ -4131,7 +4135,7 @@ async function runTests(): Promise<void> {
 
   await test('max() handles Float64Array', async () => {
     const data = new Float64Array([1.5, 2.5, 3.5, 4.5]);
-    const result = await beeThreads.max(data as any, { force: true }).map((x: number) => x * 2);
+    const result = await beeThreads.max(data as unknown as number[], { force: true }).map((x: number) => x * 2);
     
     assert.strictEqual(result.length, 4, 'Float64Array processed');
     assert.strictEqual(result[0], 3, 'First value correct');
@@ -4139,7 +4143,7 @@ async function runTests(): Promise<void> {
   });
 
   await test('STRESS: max() with concurrent operations', async () => {
-    const promises = [];
+    const promises: Promise<number[]>[] = [];
     
     for (let i = 0; i < 5; i++) {
       const data = new Array(10_000).fill(i);
@@ -4224,7 +4228,7 @@ async function runTests(): Promise<void> {
 
   await test('worker() handles concurrent load', async () => {
     const worker = beeThreads.worker('./test-workers/math-worker.js');
-    const promises = [];
+    const promises: Promise<unknown>[] = [];
     
     for (let i = 0; i < 20; i++) {
       promises.push(worker([i, i + 1, i + 2]));
