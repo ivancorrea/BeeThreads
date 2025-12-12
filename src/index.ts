@@ -719,33 +719,63 @@ export const beeThreads = {
   // ==========================================================================
 
   /**
-   * Creates a type-safe worker from a file path.
-   * 
-   * The worker file must export a default function. The worker has full access
-   * to `require()` and can use database connections, external modules, etc.
-   * 
-   * Supports both single execution and turbo mode for parallel array processing.
-   * 
-   * @param filePath - Path to the worker file
-   * @returns Executor with call and turbo methods
-   * 
-   * @example
+   * Creates a type-safe file worker with full `require()` access.
+   *
+   * Use this when workers need external dependencies like database
+   * connections, npm modules, or file system access.
+   *
+   * @typeParam T - Worker function type (for type inference)
+   * @param filePath - Path to worker file (relative or absolute)
+   * @returns Callable executor with `.turbo()` method
+   *
+   * @remarks
+   * **Worker File Requirements:**
+   * - Export default function (ESM) or `module.exports` (CJS)
+   * - For turbo: must accept array and return array
+   *
+   * **Type Safety:**
+   * Import the worker type for full inference:
    * ```typescript
-   * // workers/process-user.ts
-   * import { db } from '../database';
-   * export default async function(user: User): Promise<ProcessedUser> {
-   *   return { ...user, score: await db.getScore(user.id) };
+   * import type myWorker from './workers/my-worker';
+   * const result = await beeThreads.worker<typeof myWorker>('./workers/my-worker')(args);
+   * ```
+   *
+   * @example Single Execution
+   * ```typescript
+   * // workers/hash-password.ts
+   * import bcrypt from 'bcrypt';
+   * export default async function(password: string): Promise<string> {
+   *   return bcrypt.hash(password, 12);
    * }
-   * 
-   * // main.ts - Single execution
-   * import type processUser from './workers/process-user';
-   * const result = await beeThreads.worker<typeof processUser>('./workers/process-user')(user);
-   * 
-   * // main.ts - Turbo mode (parallel array processing)
-   * // Worker receives chunks: (users: User[]) => ProcessedUser[]
-   * const results = await beeThreads.worker('./workers/process-users.js')
+   *
+   * // main.ts
+   * import type hashPassword from './workers/hash-password';
+   * const hash = await beeThreads.worker<typeof hashPassword>('./workers/hash-password')('secret');
+   * ```
+   *
+   * @example Turbo Mode (Parallel Arrays)
+   * ```typescript
+   * // workers/process-users.ts
+   * import { db } from '../database';
+   * export default async function(users: User[]): Promise<ProcessedUser[]> {
+   *   return Promise.all(users.map(async u => ({
+   *     ...u, score: await db.getScore(u.id)
+   *   })));
+   * }
+   *
+   * // main.ts - 10,000 users across 8 workers
+   * const results = await beeThreads
+   *   .worker('./workers/process-users')
    *   .turbo(users, { workers: 8 });
    * ```
+   *
+   * @example When to Use
+   * | Need | Use |
+   * |------|-----|
+   * | Pure computation | `bee()` or `turbo()` |
+   * | Database/Redis | `worker()` |
+   * | npm modules | `worker()` |
+   * | Large array + DB | `worker().turbo()` |
    */
   worker<T extends (...args: any[]) => any>(
     filePath: string

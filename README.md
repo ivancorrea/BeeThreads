@@ -15,356 +15,58 @@
 
 ---
 
-## Parallel Programming with bee-threads
+## Install
 
 ```bash
 npm install bee-threads
 ```
 
-```js
-const { bee } = require('bee-threads')
+```ts
+import { bee, beeThreads } from 'bee-threads'
 
-// Run any function in a separate thread - promise style
-const result = await bee(x => x * 2)(21) // 42
-
-// Run with Promise.all
-const [a, b, c] = await Promise.all([bee(x => x * 2)(21), bee(x => x + 1)(41), bee(() => 'hello')()])
+const result = await bee((x: number) => x * 2)(21) // 42
 ```
 
 ---
 
-## Native worker_threads vs bee-threads
+## API Overview
 
-<table>
-<tr>
-<th>❌ Native worker_threads</th>
-<th>✅ bee-threads</th>
-</tr>
-<tr>
-<td>
+### `bee()` - Simple Curried API
 
-```js
-// worker.js (separate file!)
-const { parentPort } = require('worker_threads')
-parentPort.on('message', x => {
-	parentPort.postMessage(x * 2)
-})
-
-// main.js
-const { Worker } = require('worker_threads')
-const worker = new Worker('./worker.js')
-
-worker.postMessage(21)
-
-worker.on('message', result => {
-	console.log(result) // 42
-})
-
-worker.on('error', err => {
-	console.error('Worker error:', err)
-})
-
-worker.on('exit', code => {
-	if (code !== 0) {
-		console.error(`Worker stopped: ${code}`)
-	}
-})
-
-// No pooling, no reuse, no caching...
-// 50+ lines of boilerplate
-```
-
-</td>
-<td>
-
-```js
-const { bee } = require('bee-threads')
-
-const result = await bee(x => x * 2)(21)
-// 42
-
-// ✅ Worker pool (auto-managed)
-// ✅ Function caching (300-500x faster)
-// ✅ Worker affinity (V8 JIT benefits)
-// ✅ Priority Queues
-// ✅ Error handling (try/catch works)
-// ✅ TypeScript support
-// ✅ Zero dependencies
-// ✅ Promise-like syntax
-```
-
-</td>
-</tr>
-</table>
-
----
-
-## Basic Usage
-
-```js
-// Simple
+```ts
+// No arguments
 await bee(() => 42)()
 
 // With arguments
-await bee((a, b) => a + b)(10, 20) // → 30
+await bee((a: number, b: number) => a + b)(10, 20) // 30
 
-// External variables (closures)
+// With closures
 const TAX = 0.2
-await bee(price => price * (1 + TAX))(100, { beeClosures: { TAX } }) // → 120
+await bee((price: number) => price * (1 + TAX))(100, { beeClosures: { TAX } }) // 120
 ```
 
----
+### `beeThreads.run()` - Full Fluent API
 
-## Full API
-
-For more control, use `beeThreads`:
-
-```js
-const { beeThreads } = require('bee-threads')
-
+```ts
 await beeThreads
-	.run(x => x * 2)
-	.usingParams(21)
-	.execute() // → 42
-```
-
-### `.usingParams(...args)`
-
-```js
-await beeThreads
-	.run((a, b) => a + b)
+	.run((a: number, b: number) => a + b)
 	.usingParams(10, 20)
-	.execute() // → 30
-```
-
-### `.setContext({ vars })`
-
-Inject external variables (closures):
-
-```js
-const TAX = 0.2
-await beeThreads
-	.run(p => p * (1 + TAX))
-	.usingParams(100)
-	.setContext({ TAX })
-	.execute() // → 120
-```
-
-### `.signal(AbortSignal)` - Cancellation
-
-Cancel long-running tasks from the outside:
-
-```js
-const controller = new AbortController()
-
-// Start a heavy computation
-const promise = beeThreads
-	.run(() => {
-		let sum = 0
-		for (let i = 0; i < 1e10; i++) sum += i
-		return sum
-	})
-	.signal(controller.signal)
-	.execute()
-
-// User clicks "Cancel" button
-cancelButton.onclick = () => controller.abort()
-```
-
-### `.retry(options)` - Auto-retry with Backoff
-
-Retry failed tasks with exponential backoff:
-
-```js
-const data = await beeThreads
-	.run(() => fetchFromFlakyAPI())
-	.retry({
-		maxAttempts: 5, // Try up to 5 times
-		baseDelay: 100, // Start with 100ms delay
-		maxDelay: 5000, // Cap at 5 seconds
-		backoffFactor: 2, // Double delay each retry: 100 → 200 → 400 → 800...
-	})
-	.execute()
-```
-
-### `.priority('high' | 'normal' | 'low')`
-
-Control execution order when workers are busy:
-
-```js
-// Payment processing - jump the queue
-await beeThreads
-	.run(() => processPayment())
+	.setContext({ multiplier: 2 })
 	.priority('high')
-	.execute()
-
-// Report generation - can wait
-await beeThreads
-	.run(() => generateReport())
-	.priority('low')
-	.execute()
+	.execute() // 30
 ```
 
-### `.transfer([...buffers])` - Zero-copy Transfer
+### `beeThreads.turbo()` - Parallel Arrays
 
-Move large binary data to worker without copying:
+```ts
+const numbers = [1, 2, 3, 4, 5, 6, 7, 8]
 
-```js
-// Process 10MB image - transferred instantly, not copied
-const imageBuffer = new ArrayBuffer(10 * 1024 * 1024)
-
-await beeThreads
-	.run(buf => processImage(buf))
-	.usingParams(imageBuffer)
-	.transfer([imageBuffer.buffer])
-	.execute()
-
-// Note: imageBuffer is now empty (ownership moved to worker)
+const squares = await beeThreads.turbo(numbers).map((x: number) => x * x)
+const evens = await beeThreads.turbo(numbers).filter((x: number) => x % 2 === 0)
+const sum = await beeThreads.turbo(numbers).reduce((a: number, b: number) => a + b, 0)
 ```
 
-```js
-const image = new Uint8Array(pixels)
-const mask = new Uint8Array(maskData)
-const options = { width: 800, quality: 90 }
-
-await beeThreads
-	.run((img, msk, opts) => processImage(img, msk, opts, SHARP_OPTIONS))
-	.usingParams(image, mask, options)
-	.setContext({ SHARP_OPTIONS: { fit: 'cover' } })
-	.transfer([image.buffer, mask.buffer])
-	.execute()
-```
-
-### `.reconstructBuffers()` - Buffer Reconstruction
-
-When using libraries like **Sharp**, **fs**, or **crypto** that return `Buffer`, the result gets converted to `Uint8Array` by `postMessage`. Use `.reconstructBuffers()` to convert them back:
-
-```js
-// Without reconstructBuffers() - returns Uint8Array
-const uint8 = await beeThreads.run(() => require('fs').readFileSync('file.txt')).execute()
-console.log(Buffer.isBuffer(uint8)) // false (Uint8Array)
-
-// With reconstructBuffers() - returns Buffer
-const buffer = await beeThreads
-	.run(() => require('fs').readFileSync('file.txt'))
-	.reconstructBuffers()
-	.execute()
-console.log(Buffer.isBuffer(buffer)) // true ✅
-```
-
-Works with **Sharp** for image processing:
-
-```js
-const resized = await beeThreads
-	.run(img => require('sharp')(img).resize(100, 100).toBuffer())
-	.usingParams(imageBuffer)
-	.transfer([imageBuffer.buffer])
-	.reconstructBuffers()
-	.execute()
-
-console.log(Buffer.isBuffer(resized)) // true ✅
-```
-
-Also works with **generators**:
-
-```js
-const stream = beeThreads
-	.stream(function* () {
-		yield require('fs').readFileSync('chunk1.bin')
-		yield require('fs').readFileSync('chunk2.bin')
-	})
-	.reconstructBuffers()
-	.execute()
-
-for await (const chunk of stream) {
-	console.log(Buffer.isBuffer(chunk)) // true ✅
-}
-```
-
----
-
-## ⚡ Turbo Mode - Parallel Array Processing
-
-Process large arrays across **ALL CPU cores** with **fail-fast** error handling.
-
-> ✅ **Async (Non-blocking):** Main thread stays free for handling requests/events
-
-```
-┌───────────────────────────────────────────────────────────────────────┐
-│  beeThreads.turbo([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).map(fn)   │
-└───────────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-        ┌─────────────────────────────────────────┐
-        │         SPLIT INTO BATCHES              │
-        │    (auto-calculated per worker)         │
-        └─────────────────────────────────────────┘
-                              │
-          ┌───────────────────┼───────────────────┐
-          ▼                   ▼                   ▼
-   ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-   │  Worker 1   │     │  Worker 2   │     │  Worker 3   │
-   │ [1,2,3,4]   │     │ [5,6,7,8]   │     │ [9,10,11,12]│
-   │  fn(item)   │     │  fn(item)   │     │  fn(item)   │
-   └─────────────┘     └─────────────┘     └─────────────┘
-          │                   │                   │
-          │              ❌ ERROR!                │
-          │                   │                   │
-          ▼                   ▼                   ▼
-   ┌─────────────────────────────────────────────────────┐
-   │  FAIL-FAST: All workers abort, Promise rejects     │
-   │  Resources cleaned up, error propagated to caller  │
-   └─────────────────────────────────────────────────────┘
-```
-
-### Usage
-
-```js
-// Map
-const squares = await beeThreads.turbo(numbers).map(x => x * x)
-
-// Filter
-const evens = await beeThreads.turbo(numbers).filter(x => x % 2 === 0)
-
-// Reduce
-const sum = await beeThreads.turbo(numbers).reduce((a, b) => a + b, 0)
-
-// TypedArray (SharedArrayBuffer - zero-copy!)
-const pixels = new Float64Array(1_000_000)
-const bright = await beeThreads.turbo(pixels).map(x => Math.min(255, x * 1.2))
-
-// With context
-const factor = 2.5
-await beeThreads.turbo(data, { context: { factor } }).map(x => x * factor)
-
-// With stats
-const { data, stats } = await beeThreads.turbo(arr).mapWithStats(x => x * x)
-console.log(stats.speedupRatio) // "7.2x"
-```
-
-## 🚀 File Workers - External Files with `require()` Access
-
-When you need workers to access **external modules**, **database connections**, or **file system** — use file workers.
-
-### Basic Usage
-
-```js
-// workers/process-user.js
-const db = require('./database')
-const cache = require('./cache')
-
-module.exports = async function (userId) {
-	const user = await db.findUser(userId)
-	return { ...user, cached: cache.get(userId) }
-}
-
-// main.js
-const { beeThreads } = require('bee-threads')
-
-const user = await beeThreads.worker('./workers/process-user.js')(123)
-```
-
-### Type-Safe Workers (TypeScript)
+### `beeThreads.worker()` - File Workers
 
 ```ts
 // workers/find-user.ts
@@ -376,306 +78,195 @@ export default async function (id: number): Promise<User> {
 // main.ts
 import type findUser from './workers/find-user'
 const user = await beeThreads.worker<typeof findUser>('./workers/find-user')(123)
-//    ^User                                                                   ^number
 ```
 
-### 🔥 Turbo Mode for File Workers
+### `beeThreads.stream()` - Generators
 
-Process large arrays with file workers across **ALL CPU cores**:
-
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│  beeThreads.worker('./process-chunk.js').turbo(users, { workers: 4 })│
-└──────────────────────────────────────────────────────────────────────┘
-                                │
-                     ┌──────────┴──────────┐
-                     │   SPLIT INTO CHUNKS │
-                     └──────────┬──────────┘
-                                │
-          ┌─────────────────────┼─────────────────────┐
-          ▼                     ▼                     ▼
-   ┌─────────────┐       ┌─────────────┐       ┌─────────────┐
-   │  Worker 1   │       │  Worker 2   │       │  Worker 3   │
-   │ [u1,u2,u3]  │       │ [u4,u5,u6]  │       │ [u7,u8,u9]  │
-   │ require DB  │       │ require DB  │       │ require DB  │
-   └─────────────┘       └─────────────┘       └─────────────┘
-          │                     │                     │
-          └─────────────────────┼─────────────────────┘
-                                ▼
-                     ┌──────────────────────┐
-                     │  MERGE (order kept)  │
-                     │   [r1,r2...r9]       │
-                     └──────────────────────┘
-```
-
-```js
-// workers/process-chunk.js
-const db = require('./database')
-const calculateScore = require('./score')
-
-module.exports = async function (users) {
-	return Promise.all(
-		users.map(async user => ({
-			...user,
-			score: await calculateScore(user),
-			dbData: await db.fetch(user.id),
-		}))
-	)
-}
-
-// main.js - Process 10,000 users across 8 workers
-const results = await beeThreads.worker('./workers/process-chunk.js').turbo(users, { workers: 8 })
-```
-
-### When to Use
-
-| Need | Use |
-|------|-----|
-| Pure computation | `bee()` or `turbo()` |
-| Database/Redis | `worker().turbo()` |
-| External files/modules | `worker().turbo()` |
-| File system operations | `worker().turbo()` |
-| Third-party libraries | `worker().turbo()` |
-
----
-
-## Request Coalescing
-
-Prevents duplicate simultaneous calls from running multiple times. When the same function with identical arguments is called while a previous call is in-flight, subsequent calls share the same Promise.
-
-```js
-// All 3 calls share ONE execution, return same result
-const [r1, r2, r3] = await Promise.all([bee(x => expensiveComputation(x))(42), bee(x => expensiveComputation(x))(42), bee(x => expensiveComputation(x))(42)])
-
-// Control coalescing
-beeThreads.setCoalescing(false) // disable globally
-beeThreads.getCoalescingStats() // { coalesced: 15, unique: 100, coalescingRate: '13%' }
-
-// Opt-out for specific execution
-await beeThreads
-	.run(() => Date.now())
-	.noCoalesce()
-	.execute()
-```
-
-**Auto-detection:** Functions with `Date.now()`, `Math.random()`, `crypto.randomUUID()` are automatically excluded.
-
----
-
-## Generators (Streaming)
-
-Stream results as they're produced instead of waiting for all:
-
-```js
+```ts
 const stream = beeThreads
-	.stream(function* (n) {
-		for (let i = 1; i <= n; i++) {
-			yield i * i // Streamed immediately
-		}
-		return 'done' // Captured in stream.returnValue
+	.stream(function* (n: number) {
+		for (let i = 1; i <= n; i++) yield i * i
 	})
 	.usingParams(5)
 	.execute()
 
-for await (const value of stream) {
-	console.log(value) // 1, 4, 9, 16, 25
-}
-console.log(stream.returnValue) // 'done'
+for await (const value of stream) console.log(value) // 1, 4, 9, 16, 25
 ```
 
 ---
 
-## Error Handling
+## File Workers
 
-```js
-const { TimeoutError, AbortError, QueueFullError, WorkerError } = require('bee-threads')
+When you need **`require()`**, **database connections**, or **external modules** in workers.
 
-try {
-	await beeThreads.run(fn).execute()
-} catch (err) {
-	if (err instanceof TimeoutError) {
-		/* timeout */
-	}
-	if (err instanceof AbortError) {
-		/* cancelled */
-	}
-	if (err instanceof QueueFullError) {
-		/* queue full */
-	}
-	if (err instanceof WorkerError) {
-		// Custom error properties preserved
-		console.log(err.code, err.statusCode)
-	}
+### Single Execution
+
+```ts
+// workers/hash-password.ts
+import bcrypt from 'bcrypt'
+export default async function (password: string): Promise<string> {
+	return bcrypt.hash(password, 12)
 }
 
-// Safe mode - never throws, returns result object
-const result = await beeThreads.run(fn).safe().execute()
-if (result.status === 'fulfilled') {
-	console.log(result.value)
-} else {
-	console.log(result.error)
+// main.ts
+import type hashPassword from './workers/hash-password'
+const hash = await beeThreads.worker<typeof hashPassword>('./workers/hash-password')('secret123')
+```
+
+### Turbo Mode (Parallel Arrays)
+
+```ts
+// workers/process-users.ts
+import { db } from '../database'
+import { calculateScore } from '../utils'
+
+export default async function (users: User[]): Promise<ProcessedUser[]> {
+	return Promise.all(
+		users.map(async user => ({
+			...user,
+			score: await calculateScore(user),
+			data: await db.fetch(user.id),
+		}))
+	)
 }
+
+// main.ts - 10,000 users across 8 workers
+const results = await beeThreads.worker('./workers/process-users').turbo(users, { workers: 8 })
+```
+
+### When to Use
+
+| Need                   | Use                |
+| ---------------------- | ------------------ |
+| Pure computation       | `bee()` / `turbo()` |
+| Database/Redis         | `worker()`         |
+| External modules       | `worker()`         |
+| Large array + DB       | `worker().turbo()` |
+
+---
+
+## Fluent API Methods
+
+### `.setContext()` - Inject Variables
+
+```ts
+const TAX = 0.2
+await beeThreads
+	.run((price: number) => price * (1 + TAX))
+	.usingParams(100)
+	.setContext({ TAX })
+	.execute() // 120
+```
+
+### `.signal()` - Cancellation
+
+```ts
+const controller = new AbortController()
+
+const promise = beeThreads
+	.run(() => heavyComputation())
+	.signal(controller.signal)
+	.execute()
+
+controller.abort() // Cancel anytime
+```
+
+### `.retry()` - Auto-retry
+
+```ts
+await beeThreads
+	.run(() => fetchFromFlakyAPI())
+	.retry({ maxAttempts: 5, baseDelay: 100, backoffFactor: 2 })
+	.execute()
+```
+
+### `.priority()` - Queue Priority
+
+```ts
+await beeThreads.run(() => processPayment()).priority('high').execute()
+await beeThreads.run(() => generateReport()).priority('low').execute()
+```
+
+### `.transfer()` - Zero-copy
+
+```ts
+const buffer = new Uint8Array(10_000_000)
+await beeThreads
+	.run((buf: Uint8Array) => processImage(buf))
+	.usingParams(buffer)
+	.transfer([buffer.buffer])
+	.execute()
+```
+
+### `.reconstructBuffers()` - Buffer Reconstruction
+
+```ts
+const buffer = await beeThreads
+	.run((img: Buffer) => require('sharp')(img).resize(100).toBuffer())
+	.usingParams(imageBuffer)
+	.reconstructBuffers()
+	.execute()
+
+Buffer.isBuffer(buffer) // true
 ```
 
 ---
 
 ## Configuration
 
-```js
+```ts
 beeThreads.configure({
-	poolSize: 8, // Max workers (default: CPU cores)
-	minThreads: 2, // Pre-warmed workers
-	maxQueueSize: 1000, // Max pending tasks
-	workerIdleTimeout: 30000, // Cleanup idle workers (ms)
-	debugMode: true, // Show function source in errors
-	logger: console, // Custom logger (or null)
-	lowMemoryMode: false, // Reduce memory (~60-80% less)
-	coalescing: true, // Request coalescing (default: true)
+	poolSize: 8,
+	minThreads: 2,
+	maxQueueSize: 1000,
+	workerIdleTimeout: 30000,
+	debugMode: true,
+	logger: console,
 })
 
-await beeThreads.warmup(4) // Pre-warm 4 workers
-const stats = beeThreads.getPoolStats() // Metrics
-await beeThreads.shutdown() // Graceful shutdown
+await beeThreads.warmup(4)
+await beeThreads.shutdown()
 ```
 
 ---
 
-## TypeScript
-
-Full type inference:
+## Error Handling
 
 ```ts
-import { bee, beeThreads, TimeoutError, WorkerError } from 'bee-threads'
+import { TimeoutError, AbortError, QueueFullError, WorkerError } from 'bee-threads'
 
-const result = await bee((x: number) => x * 2)(21) // number
+try {
+	await beeThreads.run(fn).execute()
+} catch (err) {
+	if (err instanceof TimeoutError) { /* timeout */ }
+	if (err instanceof AbortError) { /* cancelled */ }
+	if (err instanceof WorkerError) { /* worker error */ }
+}
 
-const stream = beeThreads
-	.stream(function* (n: number) {
-		yield n * 2
-	})
-	.usingParams(5)
-	.execute() // StreamResult<number>
+// Safe mode - never throws
+const result = await beeThreads.run(fn).safe().execute()
+if (result.status === 'fulfilled') console.log(result.value)
 ```
-
----
-
-## Limitations
-
--  **No `this` binding** - Use arrow functions or `.setContext()`
--  **No closures** - External vars via `beeClosures` or `.setContext()`
--  **Serializable only** - No functions, Symbols, or circular refs in args/return
-
----
-
-## Worker Environment
-
-| API                      | Status                   |
-| ------------------------ | ------------------------ |
-| `require()`              | ✅ Works                 |
-| `Buffer`                 | ✅ Works                 |
-| `URL`, `URLSearchParams` | ✅ Works                 |
-| `TextEncoder/Decoder`    | ✅ Works                 |
-| `crypto`                 | ✅ Works                 |
-| `Intl`                   | ✅ Works                 |
-| `AbortController`        | ❌ Use signal externally |
-| `structuredClone`        | ❌ Not available         |
-| `performance.now()`      | ❌ Use `Date.now()`      |
-
----
-
-## Use Cases
-
-- Password hashing (PBKDF2, bcrypt)
-- Image processing (sharp, jimp)
-- Large JSON parsing
-- Data compression
-- PDF generation
-- Heavy computations
-- **Large array processing** (turbo mode)
-- **Matrix operations** (turbo mode)
-- **Numerical simulations** (turbo mode)
-- **Database batch operations** (file worker turbo)
-- **ETL pipelines** (file worker turbo)
-- **API aggregation** (file worker turbo)
-- Data pipelines
-- Video/image encoding services
-- Scientific computing
 
 ---
 
 ## Benchmarks
-
-Run the benchmark yourself:
 
 ```bash
 bun benchmarks.js   # Bun
 node benchmarks.js  # Node
 ```
 
-### Results (1M items, heavy function, 12 CPUs, 10 runs avg)
+### Results (1M items, 12 CPUs)
 
-**Bun (Windows)**
+| Runtime | Mode       | Time    | vs Main | Main Thread |
+| ------- | ---------- | ------- | ------- | ----------- |
+| Bun     | main       | 285ms   | 1.00x   | ❌ blocked   |
+| Bun     | turbo(12)  | **156ms** | **1.83x** | ✅ free      |
+| Node    | main       | 368ms   | 1.00x   | ❌ blocked   |
+| Node    | turbo(12)  | 1017ms  | 0.36x   | ✅ free      |
 
-| Mode | Time (±std) | Speedup | Main Thread |
-|------|-------------|---------|-------------|
-| main | 285±5ms | 1.00x | ❌ blocked |
-| bee | 1138±51ms | 0.25x | ✅ free |
-| turbo(8) | 180±8ms | 1.58x | ✅ free |
-| **turbo(12)** | **156±12ms** | **1.83x** | ✅ free |
-
-**Bun (Linux/Docker)**
-
-| Mode | Time (±std) | Speedup | Main Thread |
-|------|-------------|---------|-------------|
-| main | 338±8ms | 1.00x | ❌ blocked |
-| bee | 1882±64ms | 0.18x | ✅ free |
-| turbo(8) | 226±7ms | 1.50x | ✅ free |
-| **turbo(12)** | **213±20ms** | **1.59x** | ✅ free |
-
-**Node (Windows)**
-
-| Mode | Time (±std) | Speedup | Main Thread |
-|------|-------------|---------|-------------|
-| main | 368±13ms | 1.00x | ❌ blocked |
-| bee | 5569±203ms | 0.07x | ✅ free |
-| turbo(8) | 1052±22ms | 0.35x | ✅ free |
-| **turbo(12)** | **1017±57ms** | **0.36x** | ✅ free |
-
-**Node (Linux/Docker)**
-
-| Mode | Time (±std) | Speedup | Main Thread |
-|------|-------------|---------|-------------|
-| main | 522±54ms | 1.00x | ❌ blocked |
-| bee | 5520±163ms | 0.09x | ✅ free |
-| turbo(8) | 953±44ms | 0.55x | ✅ free |
-| **turbo(12)** | **861±64ms** | **0.61x** | ✅ free |
-
-### Key Insights
-
-- **Bun + turbo**: **1.6-1.8x faster** than main thread (both OS)
-- **Node + Linux**: **0.61x** - much better than Windows (0.36x)
-- **bee/turbo**: Non-blocking - main thread stays **free for HTTP/I/O**
-- **bee vs turbo**: turbo is **7x faster** than bee for large arrays
-- **Default workers**: `cpus - 1` (safe for all systems)
-
-### Customize Workers
-
-```js
-// Method chain
-await beeThreads.turbo(data).setWorkers(12).map(fn)
-
-// Or via options
-await beeThreads.turbo(data, { workers: 12 }).map(fn)
-```
-
-### When to Use
-
-| Scenario | Recommendation |
-|----------|----------------|
-| Bun + heavy function | `turbo(cpus)` → real speedup |
-| Node + HTTP server | `turbo()` → non-blocking I/O |
-| Light function (`x*x`) | Main thread → overhead not worth it |
-| CLI/batch processing | `turbo(cpus + 4)` → max throughput |
+**Key:** Bun + turbo = real speedup. Node + turbo = non-blocking I/O.
 
 ---
 
@@ -683,13 +274,13 @@ await beeThreads.turbo(data, { workers: 12 }).map(fn)
 
 - **Zero dependencies** - Lightweight and secure
 - **Inline functions** - No separate worker files
-- **Worker pool** - Reuses threads, no cold-start
+- **Worker pool** - Auto-managed, no cold-start
 - **Function caching** - LRU cache, 300-500x faster
-- **Worker affinity** - Same function → same worker (V8 JIT)
+- **Worker affinity** - V8 JIT optimization
 - **Request coalescing** - Deduplicates identical calls
-- **Turbo mode** - Parallel array processing (workers only)
-- **File workers** - External files with `require()` + turbo mode
-- **Full TypeScript** - Complete type definitions
+- **Turbo mode** - Parallel array processing
+- **File workers** - External files with `require()` + turbo
+- **Full TypeScript** - Complete type inference
 
 ---
 
