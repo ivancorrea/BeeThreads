@@ -303,7 +303,6 @@ if (result.status === 'fulfilled') console.log(result.value)
 - **Worker affinity** - V8 JIT optimization
 - **Request coalescing** - Deduplicates identical calls
 - **Turbo mode** - Parallel array processing
-- **AutoPack** - 2-3x faster object serialization
 - **File workers** - External files with `require()` + turbo
 - **Full TypeScript** - Complete type inference
 
