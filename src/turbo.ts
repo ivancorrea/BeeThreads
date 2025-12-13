@@ -2,7 +2,7 @@
  * @fileoverview beeThreads.turbo - Parallel Array Processing
  * 
  * V8-OPTIMIZED: Raw for loops, monomorphic shapes, zero hidden class transitions
- * AUTOPACK: Automatic TypedArray serialization for object arrays (1.5-10x faster)
+ * Uses structuredClone for data transfer (V8 native, efficient for all data types)
  * 
  * @example
  * ```typescript
@@ -17,16 +17,6 @@
 
 import { config } from './config';
 import { requestWorker, releaseWorker, fastHash } from './pool';
-import { 
-  autoPack, 
-  makeTransferable, 
-  getTransferablesFromPacked,
-  packNumberArray,
-  getNumberArrayTransferables,
-  packStringArray,
-  getStringArrayTransferables
-} from './autopack';
-import type { TransferablePackedData, PackedNumberArray, PackedStringArray } from './autopack';
 import type { WorkerEntry, WorkerInfo } from './types';
 import type { Worker } from 'worker_threads';
 
@@ -36,14 +26,6 @@ import type { Worker } from 'worker_threads';
 
 const TURBO_THRESHOLD = 10_000;
 const MIN_ITEMS_PER_WORKER = 1_000;
-
-/**
- * Minimum array size where AutoPack provides performance benefit.
- * Below this threshold, structuredClone overhead is acceptable.
- * 
- * Threshold: 500 items (consistent for BUN and Node)
- */
-const AUTOPACK_THRESHOLD = 500;
 
 // ============================================================================
 // TYPES
@@ -58,16 +40,6 @@ export interface TurboOptions {
   force?: boolean;
   /** Context variables to inject into worker function */
   context?: Record<string, unknown>;
-  /** 
-   * Enable/disable AutoPack serialization for object arrays.
-   * - `'auto'` (default): Enable when array has 500+ objects with supported types
-   * - `true`: Always use AutoPack (throws if data not compatible)
-   * - `false`: Never use AutoPack, use structuredClone
-   * 
-   * AutoPack provides 1.5-10x faster serialization for arrays of objects
-   * by converting to TypedArrays before postMessage transfer.
-   */
-  autoPack?: boolean | 'auto';
 }
 
 export interface TurboStats {
@@ -79,8 +51,6 @@ export interface TurboStats {
   itemsPerWorker: number;
   /** True if SharedArrayBuffer was used (TypedArrays) */
   usedSharedMemory: boolean;
-  /** True if AutoPack was used for serialization */
-  usedAutoPack: boolean;
   /** Total execution time in milliseconds */
   executionTime: number;
   /** Estimated speedup ratio vs single-threaded */
@@ -91,10 +61,6 @@ export interface TurboResult<T> {
   data: T[];
   stats: TurboStats;
 }
-
-// Serialization types for different array types
-// V8: Use numeric codes for faster switch
-type PackType = 'none' | 'number' | 'string' | 'object' | 'shared';
 
 // Monomorphic message shape - all properties declared upfront
 interface TurboWorkerMessage {
@@ -110,11 +76,6 @@ interface TurboWorkerMessage {
   controlBuffer: SharedArrayBuffer | undefined;
   chunk: unknown[] | undefined;
   initialValue: unknown | undefined;
-  // Serialization support
-  packType: PackType;
-  packedData: TransferablePackedData | undefined;
-  packedNumbers: PackedNumberArray | undefined;
-  packedStrings: PackedStringArray | undefined;
 }
 
 // Monomorphic response shape
@@ -144,67 +105,6 @@ function isTypedArray(value: unknown): value is NumericTypedArray {
   if (!ArrayBuffer.isView(value)) return false;
   // Exclude DataView (constructor.name[0] = 'D' = 68)
   return (value.constructor.name.charCodeAt(0) !== 68);
-}
-
-/**
- * Determines the best serialization strategy for the given data.
- * V8: Inlined type detection, charCode lookup.
- * 
- * Returns:
- * - 'shared': TypedArrays (uses SharedArrayBuffer)
- * - 'number': number[] → Float64Array
- * - 'string': string[] → Uint8Array UTF-8
- * - 'object': object[] → AutoPack columnar
- * - 'none': fallback to structuredClone
- */
-function getPackType(data: unknown[], options: TurboOptions): PackType {
-  // V8: Direct property access
-  const autoPackOption = options.autoPack;
-  
-  // Explicit disable
-  if (autoPackOption === false) return 'none';
-  
-  // TypedArrays use SharedArrayBuffer path
-  if (isTypedArray(data)) return 'shared';
-  
-  // Below threshold, don't pack
-  const len = data.length;
-  if (len === 0) return 'none';
-  if (autoPackOption !== true && len < AUTOPACK_THRESHOLD) return 'none';
-  
-  // V8: Inline type detection (charCode lookup)
-  const sample = data[0];
-  const t = typeof sample;
-  const c = t.charCodeAt(0);
-  
-  // 'n' = 110 = number → Float64Array
-  if (c === 110) return 'number';
-  
-  // 's' = 115 = string (check second char: 't'=116 vs 'y'=121)
-  if (c === 115 && t.charCodeAt(1) === 116) return 'string';
-  
-  // 'o' = 111 = object
-  if (c === 111 && sample !== null && !Array.isArray(sample)) {
-    // Validate object fields
-    const obj = sample as Record<string, unknown>;
-    const keys = Object.keys(obj);
-    const keyLen = keys.length;
-    
-    for (let i = 0; i < keyLen; i++) {
-      const val = obj[keys[i]];
-      const vt = typeof val;
-      const vc = vt.charCodeAt(0);
-      
-      // Reject unsupported types
-      if (vc === 102) return 'none'; // function
-      if (vc === 115 && vt.charCodeAt(1) === 121) return 'none'; // symbol
-      if (vc === 98 && vt.length === 6) return 'none'; // bigint
-      if (vc === 111 && val !== null && Array.isArray(val)) return 'none';
-    }
-    return 'object';
-  }
-  
-  return 'none';
 }
 
 
@@ -369,11 +269,7 @@ async function executeTurboTypedArray<T>(
       outputBuffer: outputBuffer,
       controlBuffer: controlBuffer,
       chunk: undefined,
-      initialValue: undefined,
-      packType: 'shared',
-      packedData: undefined,
-      packedNumbers: undefined,
-      packedStrings: undefined
+      initialValue: undefined
     };
 
     promises[i] = executeWorkerTurbo(fnString, message);
@@ -402,7 +298,6 @@ async function executeTurboTypedArray<T>(
     workersUsed: workerCount,
     itemsPerWorker: Math.ceil(dataLength / workerCount),
     usedSharedMemory: true,
-    usedAutoPack: false,
     executionTime: executionTime,
     speedupRatio: (estimatedSingle / executionTime).toFixed(1) + 'x'
   };
@@ -411,7 +306,7 @@ async function executeTurboTypedArray<T>(
 }
 
 // ============================================================================
-// REGULAR ARRAY EXECUTION - WITH AUTOPACK
+// REGULAR ARRAY EXECUTION - STRUCTUREDCLONE
 // ============================================================================
 
 async function executeTurboRegularArray<T>(
@@ -424,9 +319,6 @@ async function executeTurboRegularArray<T>(
 ): Promise<TurboResult<T>> {
   const dataLength = data.length;
   const fnHash = fastHash(fnString);
-  
-  // Determine serialization strategy
-  const packType = getPackType(data, options);
 
   // Calculate chunk boundaries (V8: pre-allocated, no slice yet)
   const chunkBounds: Array<{ start: number; end: number }> = new Array(numWorkers);
@@ -469,8 +361,7 @@ async function executeTurboRegularArray<T>(
       entry,
       worker,
       temporary,
-      () => aborted,
-      packType
+      () => aborted
     ).catch((err: Error) => {
       if (!aborted) {
         aborted = true;
@@ -513,8 +404,7 @@ async function executeTurboRegularArray<T>(
     totalItems: dataLength,
     workersUsed: chunkCount,
     itemsPerWorker: Math.ceil(dataLength / chunkCount),
-    usedSharedMemory: packType === 'shared',
-    usedAutoPack: packType !== 'none' && packType !== 'shared',
+    usedSharedMemory: false,
     executionTime: executionTime,
     speedupRatio: (estimatedSingle / executionTime).toFixed(1) + 'x'
   };
@@ -716,7 +606,7 @@ async function executeWorkerTurbo(
   });
 }
 
-// Turbo chunk execution with serialization support
+// Turbo chunk execution using structuredClone
 function executeTurboChunkDirect<T>(
   fnString: string,
   fnHash: string,
@@ -727,8 +617,7 @@ function executeTurboChunkDirect<T>(
   entry: WorkerEntry,
   worker: Worker,
   temporary: boolean,
-  shouldAbort: () => boolean,
-  packType: PackType = 'none'
+  shouldAbort: () => boolean
 ): Promise<T[]> {
   if (shouldAbort()) {
     releaseWorker(entry, worker, temporary, 'normal', 0, false, fnHash);
@@ -773,33 +662,6 @@ function executeTurboChunkDirect<T>(
     worker.on('message', onMessage);
     worker.on('error', onError);
 
-    // Prepare message based on pack type
-    let packedData: TransferablePackedData | undefined;
-    let packedNumbers: PackedNumberArray | undefined;
-    let packedStrings: PackedStringArray | undefined;
-    let transferables: ArrayBuffer[] = [];
-    let actualPackType = packType;
-
-    try {
-      if (packType === 'number') {
-        // Number array → Float64Array
-        packedNumbers = packNumberArray(chunk as number[]);
-        transferables = getNumberArrayTransferables(packedNumbers);
-      } else if (packType === 'string') {
-        // String array → UTF-8 bytes
-        packedStrings = packStringArray(chunk as string[]);
-        transferables = getStringArrayTransferables(packedStrings);
-      } else if (packType === 'object') {
-        // Object array → AutoPack columnar
-        const packed = autoPack(chunk as Record<string, unknown>[]);
-        packedData = makeTransferable(packed);
-        transferables = getTransferablesFromPacked(packedData);
-      }
-    } catch {
-      // Fallback to structuredClone if packing fails
-      actualPackType = 'none';
-    }
-
     const message: TurboWorkerMessage = {
       type: 'turbo_map',
       fn: fnString,
@@ -811,20 +673,11 @@ function executeTurboChunkDirect<T>(
       inputBuffer: undefined,
       outputBuffer: undefined,
       controlBuffer: undefined,
-      chunk: actualPackType === 'none' ? chunk : undefined,
-      initialValue: undefined,
-      packType: actualPackType,
-      packedData: packedData,
-      packedNumbers: packedNumbers,
-      packedStrings: packedStrings
+      chunk: chunk,
+      initialValue: undefined
     };
 
-    // Use transferables for zero-copy
-    if (transferables.length > 0) {
-      worker.postMessage(message, transferables);
-    } else {
-      worker.postMessage(message);
-    }
+    worker.postMessage(message);
   });
 }
 
@@ -876,11 +729,7 @@ function executeFilterChunkDirect(
       chunk: chunk,
       workerId: workerId,
       totalWorkers: totalWorkers,
-      context: context,
-      packType: 'none',
-      packedData: undefined,
-      packedNumbers: undefined,
-      packedStrings: undefined
+      context: context
     });
   });
 }
@@ -936,11 +785,7 @@ function executeReduceChunkDirect<R>(
       initialValue: initialValue,
       workerId: workerId,
       totalWorkers: totalWorkers,
-      context: context,
-      packType: 'none',
-      packedData: undefined,
-      packedNumbers: undefined,
-      packedStrings: undefined
+      context: context
     });
   });
 }
@@ -980,7 +825,6 @@ async function fallbackSingleExecution<T>(
           workersUsed: 1,
           itemsPerWorker: dataLength,
           usedSharedMemory: false,
-          usedAutoPack: false,
           executionTime: executionTime,
           speedupRatio: '1.0x'
         };
@@ -1006,11 +850,7 @@ async function fallbackSingleExecution<T>(
       chunk: chunk,
       workerId: 0,
       totalWorkers: 1,
-      context: options.context,
-      packType: 'none',
-      packedData: undefined,
-      packedNumbers: undefined,
-      packedStrings: undefined
+      context: options.context
     });
   });
 }
@@ -1127,8 +967,6 @@ async function executeMaxMapWithStats<T>(
   const chunkSize = options.chunkSize !== undefined ? options.chunkSize : Math.ceil(dataLength / totalThreads);
 
   const fnHash = fastHash(fnString);
-  // Force 'number' packType for converted TypedArrays (they're now number[])
-  const packType = isTypedArray(data) ? 'number' : getPackType(actualData, options);
 
   // Calculate chunk boundaries
   const chunkBounds: Array<{ start: number; end: number }> = new Array(totalThreads);
@@ -1170,8 +1008,7 @@ async function executeMaxMapWithStats<T>(
       entry,
       worker,
       temporary,
-      () => false,
-      packType
+      () => false
     );
   }
 
@@ -1223,8 +1060,7 @@ async function executeMaxMapWithStats<T>(
     totalItems: dataLength,
     workersUsed: chunkCount,
     itemsPerWorker: Math.ceil(dataLength / chunkCount),
-    usedSharedMemory: packType === 'shared',
-    usedAutoPack: packType !== 'none' && packType !== 'shared',
+    usedSharedMemory: false,
     executionTime: executionTime,
     speedupRatio: (estimatedSingle / executionTime).toFixed(1) + 'x'
   };
@@ -1402,4 +1238,4 @@ async function executeMaxReduce<R>(
 // EXPORTS
 // ============================================================================
 
-export { TURBO_THRESHOLD, MIN_ITEMS_PER_WORKER, AUTOPACK_THRESHOLD };
+export { TURBO_THRESHOLD, MIN_ITEMS_PER_WORKER };

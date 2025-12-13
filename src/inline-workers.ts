@@ -223,89 +223,11 @@ function apply(fn, args) {
 }
 
 // ============================================================================
-// UNPACK FUNCTIONS - V8 OPTIMIZED (synced with worker.ts)
-// ============================================================================
-
-// Unpack number array from Float64Array
-function unpackNumbers(packed) {
-  const len = packed.length;
-  if (len === 0) return [];
-  const data = packed.data;
-  const result = new Array(len);
-  const blockEnd = len & ~3;
-  let i = 0;
-  for (; i < blockEnd; i += 4) {
-    result[i] = data[i];
-    result[i + 1] = data[i + 1];
-    result[i + 2] = data[i + 2];
-    result[i + 3] = data[i + 3];
-  }
-  for (; i < len; i++) result[i] = data[i];
-  return result;
-}
-
-// Cached decoder for string unpacking
-const stringDecoder = new TextDecoder();
-
-// Unpack string array from UTF-8 bytes
-function unpackStrings(packed) {
-  const len = packed.length;
-  if (len === 0) return [];
-  const data = packed.data;
-  const offsets = packed.offsets;
-  const lengths = packed.lengths;
-  const result = new Array(len);
-  const blockEnd = len & ~3;
-  let i = 0;
-  for (; i < blockEnd; i += 4) {
-    const o0 = offsets[i], o1 = offsets[i+1], o2 = offsets[i+2], o3 = offsets[i+3];
-    const l0 = lengths[i], l1 = lengths[i+1], l2 = lengths[i+2], l3 = lengths[i+3];
-    result[i] = stringDecoder.decode(data.subarray(o0, o0 + l0));
-    result[i+1] = stringDecoder.decode(data.subarray(o1, o1 + l1));
-    result[i+2] = stringDecoder.decode(data.subarray(o2, o2 + l2));
-    result[i+3] = stringDecoder.decode(data.subarray(o3, o3 + l3));
-  }
-  for (; i < len; i++) {
-    const o = offsets[i];
-    result[i] = stringDecoder.decode(data.subarray(o, o + lengths[i]));
-  }
-  return result;
-}
-
-// Unpack object array from AutoPack columnar format
-function genericUnpack(packed) {
-  const { schema, length, numbers, strings, stringOffsets, stringLengths, booleans } = packed;
-  const { numericFields, stringFields, booleanFields } = schema;
-  if (length === 0) return [];
-  const result = new Array(length);
-  const decoder = new TextDecoder();
-  const numCount = numericFields.length;
-  const strCount = stringFields.length;
-  const boolCount = booleanFields.length;
-  for (let i = 0; i < length; i++) {
-    const obj = {};
-    for (let f = 0; f < numCount; f++) obj[numericFields[f].name] = numbers[f * length + i];
-    for (let f = 0; f < strCount; f++) {
-      const idx = f * length + i;
-      const offset = stringOffsets[idx];
-      const len = stringLengths[idx];
-      obj[stringFields[f].name] = decoder.decode(strings.subarray(offset, offset + len));
-    }
-    for (let f = 0; f < boolCount; f++) {
-      const bitIndex = f * length + i;
-      obj[booleanFields[f].name] = (booleans[Math.floor(bitIndex / 8)] & (1 << (bitIndex % 8))) !== 0;
-    }
-    result[i] = obj;
-  }
-  return result;
-}
-
-// ============================================================================
-// TURBO MODE HANDLER - V8 OPTIMIZED (synced with worker.ts)
+// TURBO MODE HANDLER - V8 OPTIMIZED (uses structuredClone)
 // ============================================================================
 
 function handleTurbo(msg) {
-  const { type, fn: fnSrc, chunk, startIndex, endIndex, context, inputBuffer, outputBuffer, controlBuffer, initialValue, workerId, packType, packedNumbers, packedStrings, packedData } = msg;
+  const { type, fn: fnSrc, chunk, startIndex, endIndex, context, inputBuffer, outputBuffer, controlBuffer, initialValue, workerId } = msg;
   
   try {
     const fn = compile(fnSrc, context);
@@ -334,34 +256,23 @@ function handleTurbo(msg) {
       return;
     }
     
-    // Determine chunk based on packType (synced with worker.ts)
-    let actualChunk;
-    const pType = packType || 'none';
-    
-    if (pType === 'number' && packedNumbers) {
-      actualChunk = unpackNumbers(packedNumbers);
-    } else if (pType === 'string' && packedStrings) {
-      actualChunk = unpackStrings(packedStrings);
-    } else if (pType === 'object' && packedData) {
-      actualChunk = genericUnpack(packedData);
-    } else if (chunk) {
-      actualChunk = chunk;
-    } else {
+    // Regular chunk (structuredClone handles serialization)
+    if (!chunk) {
       throw new Error('Turbo message missing chunk data');
     }
     
-    const chunkLen = actualChunk.length;
+    const chunkLen = chunk.length;
     let result;
     
     if (type === 'turbo_map') {
       result = new Array(chunkLen);
-      for (let i = 0; i < chunkLen; i++) result[i] = fn(actualChunk[i], i);
+      for (let i = 0; i < chunkLen; i++) result[i] = fn(chunk[i], i);
     } else if (type === 'turbo_filter') {
       result = [];
-      for (let i = 0; i < chunkLen; i++) if (fn(actualChunk[i], i)) result.push(actualChunk[i]);
+      for (let i = 0; i < chunkLen; i++) if (fn(chunk[i], i)) result.push(chunk[i]);
     } else if (type === 'turbo_reduce') {
       let acc = initialValue;
-      for (let i = 0; i < chunkLen; i++) acc = fn(acc, actualChunk[i], i);
+      for (let i = 0; i < chunkLen; i++) acc = fn(acc, chunk[i], i);
       result = [acc];
     } else {
       throw new Error('Unknown turbo type: ' + type);
