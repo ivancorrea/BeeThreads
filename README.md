@@ -147,46 +147,89 @@ await beeThreads.turbo(data, { context: { factor } }).map((x: number) => x * fac
 
 ## `beeThreads.worker()` - File Workers
 
-When you need **`require()`**, **database connections**, or **external modules** in a more sophisticated way.
+When you need **`require()`**, **database connections**, or **external modules**.
 
 ```ts
-// workers/hash-password.ts
-import bcrypt from 'bcrypt'
-export default async function (password: string): Promise<string> {
+// workers/hash-password.js
+const bcrypt = require('bcrypt')
+module.exports = async function (password) {
 	return bcrypt.hash(password, 12)
 }
 
-// main.ts
-import type hashPassword from './workers/hash-password'
-const hash = await beeThreads.worker<typeof hashPassword>('./workers/hash-password')('secret123')
+// main.ts - Just use relative path, it works! ✨
+const hash = await beeThreads.worker('./workers/hash-password.js')('secret123')
+```
+
+### ✅ Smart Path Resolution
+
+Relative paths (`./` or `../`) are **automatically resolved from your file's location**, not from `process.cwd()`. No more `__dirname` boilerplate!
+
+```ts
+// ✅ Just works - resolved from YOUR file's directory
+beeThreads.worker('./workers/task.js')
+beeThreads.worker('../shared/worker.js')
+
+// ✅ Absolute paths also work
+beeThreads.worker('/app/workers/task.js')
+```
+
+### TypeScript Workers
+
+For TypeScript, point to the **compiled `.js` file**:
+
+```ts
+// src/workers/process.ts → compiled to dist/workers/process.js
+
+// ✅ Point to compiled JS
+beeThreads.worker('./workers/process.js')  // if running from dist/
+
+// ✅ Or use explicit path to dist
+import { join } from 'path'
+beeThreads.worker(join(__dirname, '../dist/workers/process.js'))
+```
+
+### Worker File Format
+
+```js
+// workers/my-worker.js
+const db = require('./database')
+
+// Option 1: Direct export (recommended)
+module.exports = async function (data) {
+	return db.process(data)
+}
+
+// Option 2: Default export
+module.exports.default = async function (data) {
+	return db.process(data)
+}
 ```
 
 ---
 
 ## `worker().turbo()` - File Workers + Parallel Arrays
 
-Process large arrays with **database access** across multiple workers. Each worker has its own connection pool.
+Process large arrays with **database access** across multiple workers.
 
 ```ts
-// workers/process-users.ts
-import { db } from '../database'
-import { calculateScore } from '../scoring'
+// workers/process-users.js
+const db = require('../database')
 
-export default async function (users: User[]): Promise<ProcessedUser[]> {
+module.exports = async function (users) {
 	return Promise.all(
 		users.map(async user => ({
 			...user,
-			score: await calculateScore(user),
+			score: user.value * 10,
 			data: await db.fetch(user.id),
 		}))
 	)
 }
 
 // main.ts - 10,000 users across 8 workers
-const results = await beeThreads.worker('./workers/process-users').turbo(users, { workers: 8 })
+const results = await beeThreads.worker('./workers/process-users.js').turbo(users, { workers: 8 })
 ```
 
-> **Default workers:** `os.cpus().length - 1` (if not specified)
+> **Default workers:** `os.cpus().length - 1`
 
 ### When to Use
 

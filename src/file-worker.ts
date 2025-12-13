@@ -62,10 +62,18 @@ import {
   canAutoPack, 
   makeTransferable, 
   getTransferablesFromPacked,
+  packNumberArray,
+  getNumberArrayTransferables,
+  unpackNumberArray,
+  packStringArray,
+  getStringArrayTransferables,
+  unpackStringArray,
   AUTOPACK_ARRAY_THRESHOLD,
   GENERIC_UNPACK_CODE,
   GENERIC_PACK_CODE,
-  type TransferablePackedData
+  type TransferablePackedData,
+  type PackedNumberArray,
+  type PackedStringArray
 } from './autopack';
 
 // ============================================================================
@@ -213,11 +221,69 @@ const cpuCount = os.cpus().length;
 const DEFAULT_MAX_WORKERS = cpuCount > 2 ? cpuCount - 1 : 2;
 
 /**
+ * Extracts the caller's file path from the error stack.
+ * This allows relative paths to be resolved from the caller's directory,
+ * not from process.cwd().
+ * 
+ * @internal
+ */
+function getCallerDirectory(): string | null {
+  const origPrepare = Error.prepareStackTrace;
+  Error.prepareStackTrace = (_, stack) => stack;
+  
+  const err = new Error();
+  const stack = err.stack as unknown as NodeJS.CallSite[];
+  
+  Error.prepareStackTrace = origPrepare;
+  
+  if (!stack || stack.length < 4) return null;
+  
+  // Stack: [getCallerDirectory, resolvePath, createFileWorker, <caller>]
+  // We want the caller (index 3 or higher)
+  for (let i = 3; i < stack.length; i++) {
+    const fileName = stack[i]?.getFileName?.();
+    if (fileName && !fileName.includes('file-worker') && !fileName.includes('index')) {
+      // Handle file:// URLs (ESM)
+      if (fileName.startsWith('file://')) {
+        try {
+          const { fileURLToPath } = require('url');
+          return path.dirname(fileURLToPath(fileName));
+        } catch {
+          return path.dirname(fileName.replace('file://', ''));
+        }
+      }
+      return path.dirname(fileName);
+    }
+  }
+  
+  return null;
+}
+
+/**
  * Resolves a file path to an absolute path.
+ * 
+ * For relative paths (starting with './' or '../'), resolves from the 
+ * caller's directory instead of process.cwd(). This makes the API more
+ * intuitive - you can just use './workers/my-worker.js' and it works!
+ * 
  * @internal
  */
 function resolvePath(filePath: string): string {
-  return path.isAbsolute(filePath) ? filePath : path.resolve(filePath);
+  // Already absolute - use as-is
+  if (path.isAbsolute(filePath)) {
+    return filePath;
+  }
+  
+  // Relative path starting with ./ or ../ - resolve from caller's directory
+  if (filePath.startsWith('./') || filePath.startsWith('../')) {
+    const callerDir = getCallerDirectory();
+    if (callerDir) {
+      return path.resolve(callerDir, filePath);
+    }
+  }
+  
+  // Fallback to process.cwd() for bare paths like 'workers/task.js'
+  return path.resolve(filePath);
 }
 
 /**
@@ -240,28 +306,163 @@ function createWorker(absPath: string): Worker {
     const fn = require('${escapedPath}');
     const handler = fn.default || fn;
     
-    // AutoPack support for large arrays
+    // ========================================================================
+    // UNPACK FUNCTIONS - V8 OPTIMIZED
+    // ========================================================================
+    
+    // Unpack number array from Float64Array
+    function unpackNumbers(packed) {
+      const len = packed.length;
+      if (len === 0) return [];
+      const data = packed.data;
+      const result = new Array(len);
+      const blockEnd = len & ~3;
+      let i = 0;
+      for (; i < blockEnd; i += 4) {
+        result[i] = data[i];
+        result[i + 1] = data[i + 1];
+        result[i + 2] = data[i + 2];
+        result[i + 3] = data[i + 3];
+      }
+      for (; i < len; i++) result[i] = data[i];
+      return result;
+    }
+    
+    // Cached decoder for string unpacking
+    const stringDecoder = new TextDecoder();
+    
+    // Unpack string array from UTF-8 bytes
+    function unpackStrings(packed) {
+      const len = packed.length;
+      if (len === 0) return [];
+      const data = packed.data;
+      const offsets = packed.offsets;
+      const lengths = packed.lengths;
+      const result = new Array(len);
+      const blockEnd = len & ~3;
+      let i = 0;
+      for (; i < blockEnd; i += 4) {
+        const o0 = offsets[i], o1 = offsets[i+1], o2 = offsets[i+2], o3 = offsets[i+3];
+        const l0 = lengths[i], l1 = lengths[i+1], l2 = lengths[i+2], l3 = lengths[i+3];
+        result[i] = stringDecoder.decode(data.subarray(o0, o0 + l0));
+        result[i+1] = stringDecoder.decode(data.subarray(o1, o1 + l1));
+        result[i+2] = stringDecoder.decode(data.subarray(o2, o2 + l2));
+        result[i+3] = stringDecoder.decode(data.subarray(o3, o3 + l3));
+      }
+      for (; i < len; i++) {
+        const o = offsets[i];
+        result[i] = stringDecoder.decode(data.subarray(o, o + lengths[i]));
+      }
+      return result;
+    }
+    
+    // AutoPack support for object arrays
     ${GENERIC_UNPACK_CODE}
     ${GENERIC_PACK_CODE}
+    
+    // ========================================================================
+    // PACK FUNCTIONS - V8 OPTIMIZED (for results)
+    // ========================================================================
+    
+    // Pack number array into Float64Array
+    function packNumbers(arr) {
+      const len = arr.length;
+      const data = new Float64Array(len);
+      const blockEnd = len & ~3;
+      let i = 0;
+      for (; i < blockEnd; i += 4) {
+        data[i] = arr[i];
+        data[i + 1] = arr[i + 1];
+        data[i + 2] = arr[i + 2];
+        data[i + 3] = arr[i + 3];
+      }
+      for (; i < len; i++) data[i] = arr[i];
+      return { length: len, data: data };
+    }
+    
+    // Cached encoder for string packing
+    const stringEncoder = new TextEncoder();
+    
+    // Pack string array into UTF-8 bytes
+    function packStrings(arr) {
+      const len = arr.length;
+      if (len === 0) return { length: 0, data: new Uint8Array(0), offsets: new Uint32Array(0), lengths: new Uint32Array(0) };
+      
+      // Calculate total bytes needed
+      let totalBytes = 0;
+      const encodedStrings = new Array(len);
+      for (let i = 0; i < len; i++) {
+        const encoded = stringEncoder.encode(arr[i]);
+        encodedStrings[i] = encoded;
+        totalBytes += encoded.length;
+      }
+      
+      const data = new Uint8Array(totalBytes);
+      const offsets = new Uint32Array(len);
+      const lengths = new Uint32Array(len);
+      let offset = 0;
+      
+      for (let i = 0; i < len; i++) {
+        const encoded = encodedStrings[i];
+        data.set(encoded, offset);
+        offsets[i] = offset;
+        lengths[i] = encoded.length;
+        offset += encoded.length;
+      }
+      
+      return { length: len, data: data, offsets: offsets, lengths: lengths };
+    }
     
     parentPort.on('message', async (msg) => {
       const id = msg.id;
       const args = msg.args;
       const isTurboChunk = msg.isTurboChunk;
       const isPacked = msg.isPacked;
+      const packType = msg.packType || 'none';
       
       try {
         let result;
         if (isTurboChunk) {
-          // Unpack if data was sent packed
-          const chunk = isPacked ? genericUnpack(args[0]) : args[0];
+          // Unpack based on packType
+          let chunk;
+          if (!isPacked || packType === 'none') {
+            chunk = args[0];
+          } else if (packType === 'number') {
+            chunk = unpackNumbers(args[0]);
+          } else if (packType === 'string') {
+            chunk = unpackStrings(args[0]);
+          } else if (packType === 'object') {
+            chunk = genericUnpack(args[0]);
+          } else {
+            chunk = args[0];
+          }
+          
           result = await handler(chunk);
           
-          // Pack result back if input was packed and result is array
-          if (isPacked && Array.isArray(result) && result.length > 0 && typeof result[0] === 'object') {
-            const packed = genericPack(result);
-            parentPort.postMessage({ id: id, success: true, result: packed, isPacked: true });
-            return;
+          // Pack result back based on result type (match input packType when possible)
+          if (isPacked && Array.isArray(result) && result.length > 0) {
+            const sample = result[0];
+            const sampleType = typeof sample;
+            
+            if (packType === 'number' && sampleType === 'number') {
+              const packed = packNumbers(result);
+              parentPort.postMessage(
+                { id: id, success: true, result: packed, isPacked: true },
+                [packed.data.buffer]
+              );
+              return;
+            } else if (packType === 'string' && sampleType === 'string') {
+              const packed = packStrings(result);
+              parentPort.postMessage(
+                { id: id, success: true, result: packed, isPacked: true },
+                [packed.data.buffer, packed.offsets.buffer, packed.lengths.buffer]
+              );
+              return;
+            } else if (packType === 'object' && sampleType === 'object' && sample !== null) {
+              const packed = genericPack(result);
+              parentPort.postMessage({ id: id, success: true, result: packed, isPacked: true });
+              return;
+            }
           }
         } else {
           result = await handler(...args);
@@ -443,6 +644,9 @@ interface WorkerResponseWithPack extends WorkerResponse {
   isPacked?: boolean;
 }
 
+/** Pack type for serialization strategy */
+type PackType = 'number' | 'string' | 'object' | 'none';
+
 /**
  * Executes a single call on a worker and returns the result.
  * Handles message correlation and error propagation.
@@ -481,6 +685,64 @@ function executeOnWorker<T>(
     
     // V8: Monomorphic message shape
     const message = { id: id, args: args, isTurboChunk: isTurboChunk, isPacked: isPacked };
+    
+    if (transferables && transferables.length > 0) {
+      worker.postMessage(message, transferables);
+    } else {
+      worker.postMessage(message);
+    }
+  });
+}
+
+/**
+ * Executes a single call on a worker with pack type tracking.
+ * Used by turbo mode to properly unpack results based on data type.
+ * @internal
+ */
+function executeOnWorkerWithPackType<T>(
+  entry: FileWorkerEntry,
+  args: unknown[],
+  isTurboChunk: boolean = false,
+  isPacked: boolean = false,
+  transferables?: ArrayBuffer[],
+  packType: PackType = 'none'
+): Promise<{ result: T; isPacked: boolean; packType: PackType }> {
+  return new Promise((resolve, reject) => {
+    const id = ++messageId;
+    const worker = entry.worker;
+
+    const handler = (msg: WorkerResponseWithPack): void => {
+      // Only process messages for this request
+      if (msg.id !== id) return;
+
+      worker.off('message', handler);
+      releaseWorker(entry);
+
+      if (msg.success) {
+        resolve({ 
+          result: msg.result as T, 
+          isPacked: msg.isPacked || false,
+          packType: packType
+        });
+      } else {
+        const msgError = msg.error;
+        const error = new Error(msgError?.message || 'Worker error');
+        error.name = msgError?.name || 'WorkerError';
+        if (msgError?.stack) error.stack = msgError.stack;
+        reject(error);
+      }
+    };
+
+    worker.on('message', handler);
+    
+    // V8: Monomorphic message shape - include packType for worker to know how to unpack
+    const message = { 
+      id: id, 
+      args: args, 
+      isTurboChunk: isTurboChunk, 
+      isPacked: isPacked,
+      packType: packType
+    };
     
     if (transferables && transferables.length > 0) {
       worker.postMessage(message, transferables);
@@ -570,10 +832,23 @@ export function createFileWorker<T extends AnyFunction>(
     const numWorkers = options.workers !== undefined ? options.workers : DEFAULT_MAX_WORKERS;
     const dataLength = data.length;
     
-    // Determine if AutoPack should be used based on array size
-    // AutoPack is beneficial for large arrays of objects (100K+)
-    const useAutoPack = dataLength >= AUTOPACK_ARRAY_THRESHOLD && 
-                        canAutoPack(data as unknown[]);
+    // Determine pack type based on data (same logic as turbo.ts)
+    // 'number' | 'string' | 'object' | 'none'
+    type PackType = 'number' | 'string' | 'object' | 'none';
+    let packType: PackType = 'none';
+    
+    if (dataLength >= AUTOPACK_ARRAY_THRESHOLD) {
+      const sample = data[0];
+      const sampleType = typeof sample;
+      
+      if (sampleType === 'number') {
+        packType = 'number';
+      } else if (sampleType === 'string') {
+        packType = 'string';
+      } else if (canAutoPack(data as unknown[])) {
+        packType = 'object';
+      }
+    }
 
     // Small array optimization: single worker for tiny arrays
     if (dataLength <= numWorkers) {
@@ -587,7 +862,7 @@ export function createFileWorker<T extends AnyFunction>(
     const chunkSize = Math.ceil(dataLength / numWorkers);
 
     // V8: Pre-allocated promises array
-    const promises: Promise<{ result: TItem[] | TransferablePackedData; isPacked: boolean }>[] = new Array(numWorkers);
+    const promises: Promise<{ result: TItem[] | TransferablePackedData | PackedNumberArray | PackedStringArray; isPacked: boolean; packType: PackType }>[] = new Array(numWorkers);
     let promiseCount = 0;
 
     // V8: Raw for loop
@@ -601,16 +876,31 @@ export function createFileWorker<T extends AnyFunction>(
       const entry = workers[i];
       entry.busy = true;
 
-      if (useAutoPack) {
-        // Pack chunk for faster transfer
+      if (packType === 'number') {
+        // Number array → Float64Array + transferables
+        const packed = packNumberArray(chunk as number[]);
+        const buffers = getNumberArrayTransferables(packed);
+        promises[promiseCount] = executeOnWorkerWithPackType<TItem[] | PackedNumberArray>(
+          entry, [packed], true, true, buffers, 'number'
+        );
+      } else if (packType === 'string') {
+        // String array → UTF-8 bytes + transferables
+        const packed = packStringArray(chunk as string[]);
+        const buffers = getStringArrayTransferables(packed);
+        promises[promiseCount] = executeOnWorkerWithPackType<TItem[] | PackedStringArray>(
+          entry, [packed], true, true, buffers, 'string'
+        );
+      } else if (packType === 'object') {
+        // Object array → AutoPack columnar
         const packed = autoPack(chunk as Record<string, unknown>[]);
         const transferable = makeTransferable(packed);
         const buffers = getTransferablesFromPacked(transferable);
-        promises[promiseCount] = executeOnWorker<TItem[] | TransferablePackedData>(
-          entry, [transferable], true, true, buffers
+        promises[promiseCount] = executeOnWorkerWithPackType<TItem[] | TransferablePackedData>(
+          entry, [transferable], true, true, buffers, 'object'
         );
       } else {
-        promises[promiseCount] = executeOnWorker<TItem[]>(entry, [chunk], true, false);
+        // Fallback to structuredClone
+        promises[promiseCount] = executeOnWorkerWithPackType<TItem[]>(entry, [chunk], true, false, undefined, 'none');
       }
       promiseCount++;
     }
@@ -620,12 +910,21 @@ export function createFileWorker<T extends AnyFunction>(
       ? await Promise.all(promises)
       : await Promise.all(promises.slice(0, promiseCount));
 
-    // Process results (unpack if needed)
+    // Process results (unpack based on packType)
     const results: TItem[][] = new Array(promiseCount);
     for (let i = 0; i < promiseCount; i++) {
-      const { result, isPacked } = rawResults[i];
-      if (isPacked && result && typeof result === 'object' && 'schema' in result) {
-        // Unpack result from worker
+      const { result, isPacked, packType: resultPackType } = rawResults[i];
+      
+      if (!isPacked) {
+        results[i] = result as TItem[];
+      } else if (resultPackType === 'number') {
+        // Unpack Float64Array → number[]
+        results[i] = unpackNumberArray(result as PackedNumberArray) as TItem[];
+      } else if (resultPackType === 'string') {
+        // Unpack UTF-8 → string[]
+        results[i] = unpackStringArray(result as PackedStringArray) as TItem[];
+      } else if (resultPackType === 'object' && result && typeof result === 'object' && 'schema' in result) {
+        // Unpack AutoPack columnar → object[]
         results[i] = genericUnpackResult(result as TransferablePackedData) as TItem[];
       } else {
         results[i] = result as TItem[];

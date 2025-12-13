@@ -747,6 +747,55 @@ File workers allow running external worker files with full `require()` access. T
 - **File system** (fs, path)
 - **Environment variables** and configuration
 
+### ✅ Smart Path Resolution
+
+**Relative paths (`./` or `../`) are automatically resolved from the caller's directory**, not from `process.cwd()`. This eliminates the need for `__dirname` boilerplate!
+
+```js
+// ✅ Just works - bee-threads detects your file's location automatically!
+beeThreads.worker('./workers/my-worker.js')
+beeThreads.worker('../shared/utils-worker.js')
+
+// ✅ Absolute paths also work
+beeThreads.worker('/app/workers/task.js')
+```
+
+**How it works:** When you call `worker()` with a relative path, bee-threads captures the call stack and extracts your file's directory to resolve the path correctly.
+
+### Worker File Format
+
+Workers must export a function as `module.exports` or `module.exports.default`:
+
+```js
+// workers/my-worker.js
+
+// Option 1: Direct export (recommended)
+module.exports = async function(data) {
+  const result = await processData(data)
+  return result
+}
+
+// Option 2: Default export
+module.exports.default = async function(data) {
+  return processData(data)
+}
+```
+
+### TypeScript Workers
+
+Point to the **compiled `.js` file**, not `.ts`:
+
+```ts
+// src/workers/task.ts → compiles to dist/workers/task.js
+
+// If your main.ts is also in src/ and compiles to dist/:
+beeThreads.worker('./workers/task.js')  // ✅ Works! (resolved from dist/)
+
+// If you need explicit path:
+import { join } from 'path'
+beeThreads.worker(join(__dirname, 'workers/task.js'))
+```
+
 ### Architecture
 
 ```
@@ -800,7 +849,9 @@ module.exports = async function(userId) {
   return db.findUser(userId)
 }
 
-// main.js
+// main.js - Just use relative path!
+import { beeThreads } from 'bee-threads'
+
 const user = await beeThreads.worker('./workers/process-user.js')(123)
 ```
 
@@ -822,6 +873,8 @@ module.exports = async function(users) {
 }
 
 // main.js - Process 10,000 users across 8 workers
+import { beeThreads } from 'bee-threads'
+
 const results = await beeThreads
   .worker('./workers/process-chunk.js')
   .turbo(users, { workers: 8 })
