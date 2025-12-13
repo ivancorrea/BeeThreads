@@ -1085,26 +1085,7 @@ const user = await beeThreads.worker<typeof findUser>('./workers/find-user')(123
 | Real-time event handling | `turbo()` |
 | Cron jobs | `max()` |
 
-### 11. Why AutoPack for object serialization?
-
-**Decision:** Use AutoPack to convert arrays of objects into TypedArrays before postMessage transfer, providing 1.5-10x faster serialization than structuredClone.
-
-**Performance benchmarks (1M objects, Node.js):**
-
-| Object Type | structuredClone | AutoPack | Speedup |
-|-------------|-----------------|----------|---------|
-| Numeric (5 fields) | 2275ms | 698ms | **3.3x** |
-| String (2 fields) | 2150ms | 1283ms | **1.7x** |
-| Mixed (num+str+bool) | 2114ms | 863ms | **2.4x** |
-| Nested (2 levels) | 5010ms | 1709ms | **2.9x** |
-
-**When AutoPack is used:**
-
-- `autoPack: 'auto'` (default): Enabled when array has 50+ objects
-- `autoPack: true`: Always use, throws if data not compatible
-- `autoPack: false`: Never use, fallback to structuredClone
-
-### 12. Why security by default?
+### 11. Why security by default?
 
 **Decision:** Enable security protections by default with opt-out config.
 
