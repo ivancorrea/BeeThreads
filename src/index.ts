@@ -38,7 +38,7 @@
 import { config, pools, poolCounters, queues, metrics, RUNTIME, IS_BUN } from './config';
 import { createCurriedRunner, Executor } from './executor';
 import { warmupPool, getQueueLength, fastHash } from './pool';
-import { validateTimeout, validatePoolSize, validateContextSecurity } from './validation';
+import { validateTimeout, validatePoolSize, validateContextSecurity, validateFunctionSize } from './validation';
 import { deepFreeze } from './utils';
 import { createFileWorker, terminateFileWorkers } from './file-worker';
 import type { FileWorkerExecutor } from './file-worker';
@@ -148,14 +148,9 @@ export function bee<T extends (...args: any[]) => any>(fn: T): CurriedFunction<R
   }
 
   const fnString = fn.toString();
-  
+
   // Security: Validate function size (DoS prevention)
-  const fnSize = Buffer.byteLength(fnString, 'utf8');
-  if (fnSize > config.security.maxFunctionSize) {
-    throw new RangeError(
-      `Function source exceeds maximum size (${fnSize} bytes > ${config.security.maxFunctionSize} bytes limit)`
-    );
-  }
+  validateFunctionSize(fnString, config.security.maxFunctionSize);
 
   // Compute hash once at executor creation (not at execute time)
   const fnHash = fastHash(fnString);
