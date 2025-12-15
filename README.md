@@ -24,6 +24,7 @@ npm install bee-threads
 ```ts
 import { bee, beeThreads } from 'bee-threads'
 
+// Anything inside bee() runs on a separate thread
 const result = await bee((x: number) => x * 2)(21) // 42
 ```
 
@@ -53,7 +54,6 @@ await bee((price: number) => price * (1 + TAX))(100, { beeClosures: { TAX } }) /
 await beeThreads
 	.run((a: number, b: number) => a + b)
 	.usingParams(10, 20)
-	.setContext({ multiplier: 2 })
 	.execute() // 30
 ```
 
